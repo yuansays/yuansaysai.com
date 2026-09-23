@@ -15,6 +15,12 @@ type Particle = {
   accent: boolean;
 };
 
+type TrailPoint = {
+  x: number;
+  y: number;
+  life: number;
+};
+
 export function ParticleField() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -38,6 +44,8 @@ export function ParticleField() {
     let canvasVisible = true;
     let particles: Particle[] = [];
     let links: Array<[number, number]> = [];
+    let trail: TrailPoint[] = [];
+    let lastTrailSample = 0;
     let palette = {
       colors: ["#ff2bd6", "#2ad9ff", "#f4f0e8"],
       primaryRgb: "255, 43, 214",
@@ -158,12 +166,44 @@ export function ParticleField() {
       canvas.width = Math.round(width * dpr);
       canvas.height = Math.round(height * dpr);
       context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      trail = [];
       createParticles();
     };
 
     const render = (time: number, deltaScale: number) => {
       context.clearRect(0, 0, width, height);
       context.globalCompositeOperation = "source-over";
+
+      trail.forEach((point) => {
+        point.life *= Math.pow(0.82, deltaScale);
+      });
+      trail = trail.filter((point) => point.life > 0.035);
+      if (!reducedMotion && trail.length > 1) {
+        context.save();
+        context.globalCompositeOperation = "lighter";
+        context.lineCap = "round";
+        context.lineJoin = "round";
+
+        trail.forEach((point, index) => {
+          if (index === 0) return;
+
+          const previous = trail[index - 1];
+          const progress = index / Math.max(trail.length - 1, 1);
+          const alpha = point.life * (0.13 + progress * 0.35);
+
+          context.beginPath();
+          context.moveTo(previous.x, previous.y);
+          context.lineTo(point.x, point.y);
+          context.strokeStyle =
+            index % 2 === 0
+              ? `rgba(${palette.primaryRgb}, ${alpha})`
+              : `rgba(${palette.secondaryRgb}, ${alpha})`;
+          context.lineWidth = 0.7 + progress * 2.1;
+          context.stroke();
+        });
+
+        context.restore();
+      }
 
       particles.forEach((particle) => {
         const wanderScale = reducedMotion ? 0.35 : 1;
@@ -363,6 +403,7 @@ export function ParticleField() {
       const bounds = canvas.getBoundingClientRect();
       const nextX = event.clientX - bounds.left;
       const nextY = event.clientY - bounds.top;
+      const wasActive = pointer.active;
       const inside =
         nextX >= 0 &&
         nextX <= bounds.width &&
@@ -370,7 +411,7 @@ export function ParticleField() {
         nextY <= bounds.height;
 
       if (inside) {
-        if (pointer.active) {
+        if (wasActive) {
           pointer.velocityX = Math.max(
             -32,
             Math.min(32, nextX - pointer.x),
@@ -380,6 +421,23 @@ export function ParticleField() {
             Math.min(32, nextY - pointer.y),
           );
         }
+
+        if (!reducedMotion && event.pointerType !== "touch") {
+          const now = performance.now();
+          const movement = wasActive
+            ? Math.hypot(nextX - pointer.x, nextY - pointer.y)
+            : Number.POSITIVE_INFINITY;
+
+          if (!wasActive) trail = [];
+          if (!wasActive || movement >= 3 || now - lastTrailSample >= 24) {
+            trail.push({ x: nextX, y: nextY, life: 1 });
+            if (trail.length > 14) {
+              trail.splice(0, trail.length - 14);
+            }
+            lastTrailSample = now;
+          }
+        }
+
         pointer.x = nextX;
         pointer.y = nextY;
       }
@@ -393,6 +451,7 @@ export function ParticleField() {
 
     const updateMotion = (event: MediaQueryListEvent) => {
       reducedMotion = event.matches;
+      trail = [];
       cancelAnimationFrame(frame);
       frame = 0;
       resize();
@@ -454,6 +513,7 @@ export function ParticleField() {
     <canvas
       className="particle-field"
       ref={canvasRef}
+      data-pointer-trail="short"
       aria-hidden="true"
     />
   );
