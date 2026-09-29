@@ -7,10 +7,12 @@
   },
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "build:sites": "vinext build",
+    "build:words": "node scripts/build-words.mjs",
+    "build": "npm run build:words && next build",
+    "build:sites": "npm run build:words && vinext build",
     "start": "npx --yes serve out",
     "test": "npm run build",
+    "test:words": "node --test apps/yuansays-words/app/core/utils/local-core.test.mjs",
     "lint": "eslint . --ignore-pattern out --ignore-pattern .next --ignore-pattern dist --ignore-pattern .vinext"
   },
   "dependencies": {

@@ -177,6 +177,7 @@ export default function Home() {
         <nav aria-label="主导航">
           <a href="#notes">专栏</a>
           <a href="/vibe-hub">术语图鉴</a>
+          <a href="/words/" aria-label="yuansays words 背单词">背单词</a>
           <a href="#experiments">功能</a>
           <a href="#about">关于</a>
         </nav>
@@ -318,6 +319,9 @@ export default function Home() {
             <br />
             只分享真正有用的 AI。
           </h2>
+          <a className="button button-quiet" href="/words/">
+            yuansays words · 背单词 <span aria-hidden="true">↗</span>
+          </a>
         </div>
         <div className="experiment-grid">
           {experiments.map(([index, title, copy]) => (

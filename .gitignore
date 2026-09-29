@@ -40,3 +40,11 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# Independently built word-learning application
+/apps/yuansays-words/node_modules/
+/apps/yuansays-words/.nuxt/
+/apps/yuansays-words/.output/
+/apps/yuansays-words/dist/
+/public/words/
+/public/.words-staging/
