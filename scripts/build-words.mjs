@@ -183,16 +183,18 @@ if (!stageOnly) {
   }
 
   console.log("Building yuansays words for /words/…");
+  // Nuxt auto-detects Cloudflare Pages in CI and otherwise emits dist/words.
+  // The parent Next.js export stages the provider-neutral .output/public tree.
   // Windows .cmd files require cmd.exe; the command is a fixed string, with no
   // paths or user-controlled arguments interpolated into shell syntax.
   const result = process.platform === "win32"
-    ? spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "node_modules\\.bin\\nuxt.cmd generate"], {
+    ? spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "node_modules\\.bin\\nuxt.cmd generate --preset=static"], {
         cwd: application,
         env: { ...process.env, NUXT_APP_BASE_URL: "/words/" },
         stdio: "inherit",
         windowsHide: true,
       })
-    : spawnSync(path.join(application, "node_modules", ".bin", "nuxt"), ["generate"], {
+    : spawnSync(path.join(application, "node_modules", ".bin", "nuxt"), ["generate", "--preset=static"], {
         cwd: application,
         env: { ...process.env, NUXT_APP_BASE_URL: "/words/" },
         stdio: "inherit",
