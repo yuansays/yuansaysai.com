@@ -167,22 +167,32 @@ async function publishStagedAssets() {
 
 if (!stageOnly) {
   if (!existsSync(path.join(application, "node_modules", "nuxt", "package.json"))) {
-    throw new Error(
-      "Word app dependencies are missing. Run pnpm --dir apps/yuansays-words install --frozen-lockfile first.",
-    );
+    console.log("Installing yuansays words dependencies from its pinned lockfile…");
+    const install = process.platform === "win32"
+      ? spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "npx.cmd --yes pnpm@10.33.0 install --frozen-lockfile --prod=false"], {
+          cwd: application, stdio: "inherit", windowsHide: true,
+        })
+      : spawnSync("npx", ["--yes", "pnpm@10.33.0", "install", "--frozen-lockfile", "--prod=false"], {
+          cwd: application, stdio: "inherit",
+        });
+    if (install.error) throw install.error;
+    if (install.status !== 0) process.exit(install.status ?? 1);
+    if (!existsSync(path.join(application, "node_modules", "nuxt", "package.json"))) {
+      throw new Error("Dependency installation finished without Nuxt.");
+    }
   }
 
   console.log("Building yuansays words for /words/…");
   // Windows .cmd files require cmd.exe; the command is a fixed string, with no
   // paths or user-controlled arguments interpolated into shell syntax.
   const result = process.platform === "win32"
-    ? spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "pnpm.cmd run generate"], {
+    ? spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "node_modules\\.bin\\nuxt.cmd generate"], {
         cwd: application,
         env: { ...process.env, NUXT_APP_BASE_URL: "/words/" },
         stdio: "inherit",
         windowsHide: true,
       })
-    : spawnSync("pnpm", ["run", "generate"], {
+    : spawnSync(path.join(application, "node_modules", ".bin", "nuxt"), ["generate"], {
         cwd: application,
         env: { ...process.env, NUXT_APP_BASE_URL: "/words/" },
         stdio: "inherit",
