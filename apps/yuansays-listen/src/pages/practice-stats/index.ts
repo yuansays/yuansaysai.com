@@ -1,0 +1,703 @@
+import { css, html, LitElement, nothing } from 'lit';
+import { customElement, state } from 'lit/decorators.js';
+import { msg, localized } from '@lit/localize';
+import { classMap } from 'lit/directives/class-map.js';
+import { navigator } from 'lit-element-router';
+
+import {
+  aggregatePracticeStats,
+  formatActiveDuration,
+  resolveRangeBounds,
+  type ModeFilter,
+  type PracticeStatsSummary,
+  type StatsRangePreset,
+} from '../../analytics/practice-stats-aggregate.js';
+import { getAllPracticeSessions } from '../../db/practice-session.js';
+import { reportError } from '../../lib/error-reporter.js';
+import type { PracticeAnalyticsMode } from '../../types/models.js';
+import '../../components/ui/input.js';
+import type { InputChangeDetail } from '../../components/ui/input.js';
+import '../../components/ui/icon.js';
+import '../../components/ui/tooltip.js';
+
+const NavigatorElement = navigator(LitElement);
+
+@customElement('practice-stats-page')
+@localized()
+export class PracticeStatsPage extends NavigatorElement {
+  static styles = css`
+    :host {
+      display: block;
+    }
+
+    .page {
+      display: grid;
+      gap: var(--space-stack);
+    }
+
+    .filters {
+      display: grid;
+      gap: var(--space-block);
+    }
+
+    .seg {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-sm);
+    }
+
+    .seg-btn {
+      appearance: none;
+      border: 1px solid var(--color-border, #d9d9d9);
+      background: var(--color-surface, #fff);
+      color: var(--color-text, rgba(0, 0, 0, 0.88));
+      border-radius: 999px;
+      padding: 6px 14px;
+      font: inherit;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      transition:
+        border-color 0.15s ease,
+        color 0.15s ease,
+        background-color 0.15s ease;
+    }
+
+    .seg-btn:hover {
+      border-color: var(--color-primary, #1677ff);
+      color: var(--color-primary, #1677ff);
+    }
+
+    .seg-btn.active {
+      background: rgba(22, 119, 255, 0.08);
+      border-color: var(--color-primary, #1677ff);
+      color: var(--color-primary, #1677ff);
+      font-weight: 600;
+    }
+
+    .custom-range {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-sm);
+      align-items: center;
+    }
+
+    .custom-range label {
+      display: flex;
+      align-items: center;
+      gap: var(--space-xs);
+      font-size: 0.8125rem;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+    }
+
+    .custom-range ui-input {
+      width: 150px;
+    }
+
+    .card {
+      background: var(--color-surface, #fff);
+      border: 1px solid var(--color-border, #d9d9d9);
+      border-radius: var(--radius-md, 8px);
+      box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.06));
+      padding: var(--space-inline);
+    }
+
+    .card h2 {
+      margin: 0 0 var(--space-md);
+      font-size: 0.9375rem;
+      font-weight: 600;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: var(--space-block);
+    }
+
+    .stat {
+      min-width: 0;
+    }
+
+    .stat-value {
+      font-size: 1.375rem;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      line-height: 1.2;
+      color: var(--color-text, rgba(0, 0, 0, 0.88));
+    }
+
+    .stat-label {
+      margin-top: var(--space-xs);
+      font-size: 0.75rem;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+    }
+
+    .bars {
+      display: grid;
+      grid-template-columns: 44px 1fr max-content;
+      gap: var(--space-sm);
+      align-items: center;
+    }
+
+    .bar-row {
+      display: contents;
+      font-size: 0.75rem;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+    }
+
+    .bar-track {
+      height: 18px;
+      border-radius: 4px;
+      background: #f0f0f0;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      display: flex;
+      height: 100%;
+      min-width: 0;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bar-fill > span {
+      display: block;
+      height: 100%;
+      min-width: 0;
+    }
+
+    .seg-free {
+      background: var(--color-primary, #1677ff);
+    }
+    .seg-discrimination {
+      background: #722ed1;
+    }
+    .seg-shadowing {
+      background: #13c2c2;
+    }
+    .seg-echo {
+      background: #fa8c16;
+    }
+
+    .bar-value {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      color: var(--color-text, rgba(0, 0, 0, 0.88));
+    }
+
+    .breakdown {
+      display: grid;
+      gap: var(--space-sm);
+    }
+
+    .stack-bar {
+      display: flex;
+      height: 12px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #f0f0f0;
+    }
+
+    .stack-bar > span {
+      display: block;
+      height: 100%;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-block) var(--space-inline);
+      font-size: 0.8125rem;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-xs);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+
+    .dot.free {
+      background: var(--color-primary, #1677ff);
+    }
+    .dot.discrimination {
+      background: #722ed1;
+    }
+    .dot.shadowing {
+      background: #13c2c2;
+    }
+    .dot.echo {
+      background: #fa8c16;
+    }
+
+    .legend-value {
+      color: var(--color-text, rgba(0, 0, 0, 0.88));
+      font-weight: 500;
+    }
+
+    .ranking {
+      display: grid;
+      gap: var(--space-sm);
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    .rank-item {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: var(--space-sm) var(--space-block);
+      align-items: center;
+    }
+
+    .rank-title {
+      appearance: none;
+      border: none;
+      background: transparent;
+      padding: 0;
+      text-align: left;
+      cursor: pointer;
+      font: inherit;
+      font-size: 0.875rem;
+      color: var(--color-primary, #1677ff);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-xs);
+      min-width: 0;
+    }
+
+    .rank-title:hover {
+      color: var(--color-primary-hover, #4096ff);
+    }
+
+    .rank-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .rank-type {
+      flex-shrink: 0;
+      color: var(--color-primary, #1677ff);
+      display: inline-flex;
+    }
+
+    .rank-ms {
+      font-size: 0.8125rem;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+      font-variant-numeric: tabular-nums;
+    }
+
+    .rank-track {
+      grid-column: 1 / -1;
+      height: 6px;
+      border-radius: 999px;
+      background: #f0f0f0;
+      overflow: hidden;
+    }
+
+    .rank-fill {
+      height: 100%;
+      background: var(--color-primary, #1677ff);
+      border-radius: 999px;
+    }
+
+    .empty {
+      margin: 0;
+      font-size: 0.875rem;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+    }
+
+    .loading-wrap {
+      display: flex;
+      justify-content: center;
+      padding: var(--space-section) 0;
+      font-size: 0.875rem;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+    }
+
+    .hint {
+      margin: 0;
+      font-size: 0.75rem;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+    }
+
+    @media (max-width: 560px) {
+      .summary {
+        grid-template-columns: 1fr;
+      }
+
+      .bars {
+        grid-template-columns: 36px 1fr max-content;
+      }
+    }
+  `;
+
+  @state()
+  private _preset: StatsRangePreset = 'last7';
+
+  @state()
+  private _mode: ModeFilter = 'all';
+
+  @state()
+  private _customFrom = '';
+
+  @state()
+  private _customTo = '';
+
+  @state()
+  private _loading = true;
+
+  @state()
+  private _summary: PracticeStatsSummary | null = null;
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    void this._reload();
+  }
+
+  private async _reload(): Promise<void> {
+    this._loading = true;
+    try {
+      const sessions = await getAllPracticeSessions();
+      this._summary = aggregatePracticeStats(sessions, {
+        preset: this._preset,
+        mode: this._mode,
+        customFrom: this._customFrom || undefined,
+        customTo: this._customTo || undefined,
+      });
+    } catch (err) {
+      void reportError(err, { where: 'practice-stats-page.load' });
+      this._summary = aggregatePracticeStats([]);
+    } finally {
+      this._loading = false;
+    }
+  }
+
+  private _setPreset(preset: StatsRangePreset): void {
+    this._preset = preset;
+    if (preset === 'custom' && (!this._customFrom || !this._customTo)) {
+      const bounds = resolveRangeBounds('last7');
+      this._customFrom = bounds.fromDateKey;
+      this._customTo = bounds.toDateKey;
+    }
+    void this._reload();
+  }
+
+  private _setMode(mode: ModeFilter): void {
+    this._mode = mode;
+    void this._reload();
+  }
+
+  private _onCustomFrom = (e: CustomEvent<InputChangeDetail>): void => {
+    this._customFrom = e.detail.value;
+    if (this._preset === 'custom') void this._reload();
+  };
+
+  private _onCustomTo = (e: CustomEvent<InputChangeDetail>): void => {
+    this._customTo = e.detail.value;
+    if (this._preset === 'custom') void this._reload();
+  };
+
+  private _modeLabel(mode: PracticeAnalyticsMode): string {
+    switch (mode) {
+      case 'free':
+        return msg('自由听');
+      case 'discrimination':
+        return msg('抗噪听');
+      case 'shadowing':
+        return msg('影子跟读');
+      case 'echo':
+        return msg('回声跟读');
+    }
+  }
+
+  private _pct(part: number, total: number): string {
+    if (total <= 0 || part <= 0) return '0%';
+    return `${Math.round((part / total) * 100)}%`;
+  }
+
+  private _renderFilters() {
+    const presets: Array<{ key: StatsRangePreset; label: string }> = [
+      { key: 'today', label: msg('今天') },
+      { key: 'last7', label: msg('近 7 天') },
+      { key: 'month', label: msg('本月') },
+      { key: 'custom', label: msg('自定义') },
+    ];
+    const modes: Array<{ key: ModeFilter; label: string }> = [
+      { key: 'all', label: msg('全部') },
+      { key: 'free', label: msg('自由听') },
+      { key: 'discrimination', label: msg('抗噪听') },
+      { key: 'shadowing', label: msg('影子跟读') },
+      { key: 'echo', label: msg('回声跟读') },
+    ];
+
+    return html`
+      <div class="filters">
+        <div class="seg" role="group" aria-label=${msg('日期区间')}>
+          ${presets.map(
+            (p) => html`
+              <button
+                type="button"
+                class=${classMap({ 'seg-btn': true, active: this._preset === p.key })}
+                @click=${() => this._setPreset(p.key)}
+              >
+                ${p.label}
+              </button>
+            `,
+          )}
+        </div>
+        <div class="seg" role="group" aria-label=${msg('练习模式')}>
+          ${modes.map(
+            (m) => html`
+              <button
+                type="button"
+                class=${classMap({ 'seg-btn': true, active: this._mode === m.key })}
+                @click=${() => this._setMode(m.key)}
+              >
+                ${m.label}
+              </button>
+            `,
+          )}
+        </div>
+        ${this._preset === 'custom'
+          ? html`
+              <div class="custom-range">
+                <label>
+                  ${msg('起')}
+                  <ui-input
+                    type="date"
+                    .value=${this._customFrom}
+                    @change=${this._onCustomFrom}
+                  ></ui-input>
+                </label>
+                <label>
+                  ${msg('止')}
+                  <ui-input
+                    type="date"
+                    .value=${this._customTo}
+                    @change=${this._onCustomTo}
+                  ></ui-input>
+                </label>
+              </div>
+            `
+          : nothing}
+        <p class="hint">${msg('统计为有效练习时长（播放/录音等实际练习时间），非墙钟时间。')}</p>
+      </div>
+    `;
+  }
+
+  private _renderSummary(summary: PracticeStatsSummary) {
+    return html`
+      <section class="card">
+        <div class="summary">
+          <div class="stat">
+            <div class="stat-value">${formatActiveDuration(summary.totalMs)}</div>
+            <div class="stat-label">${msg('总时长')}</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value">${summary.activeDayCount}</div>
+            <div class="stat-label">${msg('有练习日')}</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value">${summary.sessionCount}</div>
+            <div class="stat-label">${msg('会话数')}</div>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  private _renderTrend(summary: PracticeStatsSummary) {
+    const max = Math.max(...summary.buckets.map((b) => b.totalMs), 1);
+    const title =
+      summary.granularity === 'day'
+        ? msg('练习趋势（按日）')
+        : summary.granularity === 'week'
+          ? msg('练习趋势（按周）')
+          : msg('练习趋势（按月）');
+
+    return html`
+      <section class="card">
+        <h2>${title}</h2>
+        ${summary.totalMs === 0
+          ? html`<p class="empty">${msg('该区间暂无练习数据。')}</p>`
+          : html`
+              <div class="bars" role="img" aria-label=${title}>
+                ${summary.buckets.map((b) => {
+                  const widthPct = b.totalMs > 0 ? Math.max((b.totalMs / max) * 100, 4) : 0;
+                  return html`
+                    <div class="bar-row">
+                      <span>${b.label}</span>
+                      <div class="bar-track">
+                        <div class="bar-fill" style="width:${widthPct}%">
+                          ${b.byMode.free > 0
+                            ? html`<span
+                                class="seg-free"
+                                style="flex:${b.byMode.free}"
+                                title=${this._modeLabel('free')}
+                              ></span>`
+                            : nothing}
+                          ${b.byMode.discrimination > 0
+                            ? html`<span
+                                class="seg-discrimination"
+                                style="flex:${b.byMode.discrimination}"
+                                title=${this._modeLabel('discrimination')}
+                              ></span>`
+                            : nothing}
+                          ${b.byMode.shadowing > 0
+                            ? html`<span
+                                class="seg-shadowing"
+                                style="flex:${b.byMode.shadowing}"
+                                title=${this._modeLabel('shadowing')}
+                              ></span>`
+                            : nothing}
+                          ${b.byMode.echo > 0
+                            ? html`<span
+                                class="seg-echo"
+                                style="flex:${b.byMode.echo}"
+                                title=${this._modeLabel('echo')}
+                              ></span>`
+                            : nothing}
+                        </div>
+                      </div>
+                      <span class="bar-value">${formatActiveDuration(b.totalMs)}</span>
+                    </div>
+                  `;
+                })}
+              </div>
+            `}
+      </section>
+    `;
+  }
+
+  private _renderBreakdown(summary: PracticeStatsSummary) {
+    const { free, discrimination, shadowing, echo } = summary.byMode;
+    const total = summary.totalMs;
+
+    return html`
+      <section class="card">
+        <h2>${msg('模式构成')}</h2>
+        ${total === 0
+          ? html`<p class="empty">${msg('该区间暂无练习数据。')}</p>`
+          : html`
+              <div class="breakdown">
+                <div class="stack-bar" role="img" aria-label=${msg('模式构成')}>
+                  ${free > 0 ? html`<span class="seg-free" style="flex:${free}"></span>` : nothing}
+                  ${discrimination > 0
+                    ? html`<span class="seg-discrimination" style="flex:${discrimination}"></span>`
+                    : nothing}
+                  ${shadowing > 0
+                    ? html`<span class="seg-shadowing" style="flex:${shadowing}"></span>`
+                    : nothing}
+                  ${echo > 0 ? html`<span class="seg-echo" style="flex:${echo}"></span>` : nothing}
+                </div>
+                <div class="legend">
+                  <span class="legend-item">
+                    <span class="dot free"></span>${msg('自由听')}
+                    <span class="legend-value"
+                      >${formatActiveDuration(free)} · ${this._pct(free, total)}</span
+                    >
+                  </span>
+                  <span class="legend-item">
+                    <span class="dot discrimination"></span>${msg('抗噪听')}
+                    <span class="legend-value"
+                      >${formatActiveDuration(discrimination)} ·
+                      ${this._pct(discrimination, total)}</span
+                    >
+                  </span>
+                  <span class="legend-item">
+                    <span class="dot shadowing"></span>${msg('影子跟读')}
+                    <span class="legend-value"
+                      >${formatActiveDuration(shadowing)} · ${this._pct(shadowing, total)}</span
+                    >
+                  </span>
+                  <span class="legend-item">
+                    <span class="dot echo"></span>${msg('回声跟读')}
+                    <span class="legend-value"
+                      >${formatActiveDuration(echo)} · ${this._pct(echo, total)}</span
+                    >
+                  </span>
+                </div>
+              </div>
+            `}
+      </section>
+    `;
+  }
+
+  private _renderRanking(summary: PracticeStatsSummary) {
+    const top = summary.mediaRanking[0]?.totalMs || 1;
+    return html`
+      <section class="card">
+        <h2>${msg('练习最多的材料')}</h2>
+        ${summary.mediaRanking.length === 0
+          ? html`<p class="empty">${msg('该区间暂无练习数据。')}</p>`
+          : html`
+              <ol class="ranking">
+                ${summary.mediaRanking.map(
+                  (item) => html`
+                    <li class="rank-item">
+                      <button
+                        type="button"
+                        class="rank-title"
+                        title=${item.mediaFilename || item.mediaTitle}
+                        @click=${() =>
+                          this.navigate(`/listen/practice?mediaId=${encodeURIComponent(item.mediaId)}`)}
+                      >
+                        <span class="rank-type">
+                          <ui-tooltip
+                            title="${item.mediaType === 'video' ? msg('视频') : msg('音频')}"
+                          >
+                            <ui-icon
+                              name="${item.mediaType === 'video' ? 'video' : 'music'}"
+                              size="var(--icon-md)"
+                            ></ui-icon>
+                          </ui-tooltip>
+                        </span>
+                        <span class="rank-name">${item.mediaTitle}</span>
+                      </button>
+                      <span class="rank-ms">${formatActiveDuration(item.totalMs)}</span>
+                      <div class="rank-track">
+                        <div
+                          class="rank-fill"
+                          style="width:${Math.max((item.totalMs / top) * 100, 2)}%"
+                        ></div>
+                      </div>
+                    </li>
+                  `,
+                )}
+              </ol>
+            `}
+      </section>
+    `;
+  }
+
+  render() {
+    if (this._loading && !this._summary) {
+      return html`<div class="loading-wrap">${msg('加载中…')}</div>`;
+    }
+
+    const summary = this._summary!;
+    return html`
+      <div class="page">
+        ${this._renderFilters()} ${this._renderSummary(summary)} ${this._renderTrend(summary)}
+        ${this._renderBreakdown(summary)} ${this._renderRanking(summary)}
+      </div>
+    `;
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'practice-stats-page': PracticeStatsPage;
+  }
+}

@@ -1,0 +1,1265 @@
+import { msg, str, localized } from '@lit/localize';
+import { css, html, LitElement, type TemplateResult } from 'lit';
+import { customElement, property, query, state } from 'lit/decorators.js';
+
+import { MediaControllerHost } from '../../controllers/media-controller-host.js';
+import type {
+  MediaController,
+  MediaControllerSnapshot,
+} from '../../controllers/media-controller.js';
+import { formatTime, FORWARDED_MEDIA_EVENTS, MAX_SLEEP_MINUTES } from '../../lib/playback-utils.js';
+import { getMaxPlaybackRate, getMaxVolumeBoost } from '../../lib/app-settings.js';
+import { supportsKeyboardShortcuts } from '../../lib/hotkeys/index.js';
+import { playbackRateMarks, volumeMarks } from '../../lib/slider-marks.js';
+import { PLAYBACK_RATE_LIMITS } from '../../types/models.js';
+import '../ui/button.js';
+import '../ui/slider.js';
+import '../ui/tooltip.js';
+import '../ui/select.js';
+import '../ui/icon.js';
+import '../ui/icon-button.js';
+import '../ui/dropdown.js';
+import { MediaControlsConfig, MediaPlayerMode } from '../../types/index.js';
+import { SelectChangeDetail } from '../ui/select.js';
+import { Z_INDEX } from '../ui/internal/z-index.js';
+import { DropdownPlacement } from '../ui/dropdown.js';
+
+// @TODO apply default config
+const defaultControlConfig: MediaControlsConfig = {
+  loopMode: true,
+  sleepMode: true,
+  pauseMode: true,
+  playPause: true,
+  volume: true,
+  playbackRate: true,
+  progress: true,
+  previousNextTrack: true,
+  previousNextSegment: false,
+  replay: false,
+  switchMode: false,
+  advancedSetting: true,
+};
+
+@customElement('media-player')
+@localized()
+export class MediaPlayer extends LitElement {
+  static styles = css`
+    :host {
+      display: block;
+    }
+
+    /* Fixed Mode */
+    :host([mode='fixed']) {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 1000;
+      box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.08);
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    :host([mode='fixed'][collapsed]) {
+      transform: translateY(100%);
+    }
+
+    /* Mini Mode */
+    :host([mode='mini']) {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 1000;
+    }
+
+    .surface {
+      background: var(--color-surface, #fff);
+      border: 1px solid var(--color-border, #e8e8e8);
+      border-radius: var(--radius-md, 8px);
+      box-shadow: var(--shadow-sm, 0 1px 3px rgba(0, 0, 0, 0.05));
+      overflow: hidden;
+      position: relative;
+    }
+
+    :host([mode='fixed']) .surface {
+      border-radius: 0;
+      border-left: none;
+      border-right: none;
+      border-bottom: none;
+    }
+
+    /* APlayer-like body layout */
+    .player-body {
+      position: relative;
+      display: flex;
+      align-items: stretch;
+      /* height: 72px; */
+    }
+
+    /* Cover / Picture */
+    .pic-wrap {
+      position: relative;
+      width: 72px;
+      height: 72px;
+      background: #eee;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      overflow: hidden;
+    }
+
+    .cover-art {
+      width: 100%;
+      height: 100%;
+      background-size: cover;
+      background-position: center;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--color-text-secondary, #666);
+      transition: transform 0.3s ease;
+    }
+
+    .pic-wrap:hover .cover-art {
+      transform: scale(1.05);
+    }
+
+    /* Play overlay on hover */
+    .play-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      color: #fff;
+      transition: opacity 0.2s ease;
+    }
+
+    .pic-wrap:hover .play-overlay {
+      opacity: 1;
+    }
+
+    /* Info Column */
+    .info-wrap {
+      flex-grow: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: var(--space-block) var(--space-inline);
+      overflow: hidden;
+    }
+
+    .info-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 2px;
+      gap: var(--space-block);
+    }
+
+    .title {
+      margin: 0;
+      font-size: 0.9375rem;
+      font-weight: 600;
+      color: var(--color-text, #333);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex-grow: 1;
+    }
+
+    .time-display {
+      font-size: 0.75rem;
+      color: var(--color-text-secondary, #666);
+      font-variant-numeric: tabular-nums;
+      flex-shrink: 0;
+    }
+
+    .time-separator {
+      margin: 0 2px;
+      opacity: 0.7;
+    }
+
+    /* Progress bar */
+    .progress-bar-wrap {
+      margin: 2px 0 var(--space-xs) 0;
+    }
+
+    /* Control row containing buttons */
+    .control-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .nav-buttons {
+      display: flex;
+      align-items: center;
+      gap: var(--space-sm);
+    }
+
+    .action-buttons {
+      display: flex;
+      align-items: center;
+      gap: var(--space-sm);
+    }
+
+    .rate-trigger {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: calc(var(--icon-lg) + 2 * var(--space-xs));
+      min-height: calc(var(--icon-lg) + 2 * var(--space-xs));
+      padding: var(--space-xs);
+      border: none;
+      border-radius: var(--radius-md, 8px);
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      font-size: 0.8125rem;
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+      cursor: pointer;
+      transition: background-color 0.15s ease;
+    }
+
+    .rate-trigger:hover:not(:disabled) {
+      background: rgba(0, 0, 0, 0.04);
+    }
+
+    .rate-trigger--fast {
+      color: var(--color-warning, #fa8c16);
+    }
+
+    .rate-trigger:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .rate-trigger:focus-visible {
+      outline: 2px solid var(--color-primary, #1677ff);
+      outline-offset: 2px;
+    }
+
+    .volume-trigger {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: var(--space-xs);
+      border: none;
+      border-radius: var(--radius-md, 8px);
+      background: transparent;
+      color: inherit;
+      line-height: 0;
+      cursor: pointer;
+      transition: background-color 0.15s ease;
+    }
+
+    .volume-trigger:hover:not(:disabled) {
+      background: rgba(0, 0, 0, 0.04);
+    }
+
+    .volume-trigger--boosted {
+      color: var(--color-warning, #fa8c16);
+    }
+
+    .volume-trigger:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .volume-trigger:focus-visible {
+      outline: 2px solid var(--color-primary, #1677ff);
+      outline-offset: 2px;
+    }
+
+    /* Settings toggle active state */
+    .settings-toggle-btn.active {
+      color: var(--color-primary, #1677ff);
+    }
+
+    /* Settings Panel styling */
+    .settings-panel {
+      height: 0;
+      overflow: hidden;
+    }
+
+    .settings-panel.expanded {
+      height: auto;
+      border-top: 1px solid var(--color-border, #e8e8e8);
+      padding: var(--space-block) var(--space-inline);
+      overflow-y: auto;
+    }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: var(--space-block) var(--space-inline);
+    }
+
+    .setting-item {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-xs);
+    }
+
+    .setting-label {
+      font-size: 0.75rem;
+      color: var(--color-text-secondary, #666);
+    }
+
+    /* Fixed Switcher arrow handle */
+    .fixed-switcher {
+      position: absolute;
+      top: -20px;
+      right: 20px;
+      width: 40px;
+      height: 20px;
+      background: var(--color-surface, #fff);
+      border: 1px solid var(--color-border, #e8e8e8);
+      border-bottom: none;
+      border-radius: 4px 4px 0 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      box-shadow: 0 -2px 6px rgba(0, 0, 0, 0.04);
+      z-index: 1001;
+    }
+
+    /* Mini Player */
+    .mini-player {
+      position: relative;
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      box-shadow: var(--shadow-md, 0 4px 10px rgba(0, 0, 0, 0.1));
+      cursor: pointer;
+      overflow: visible;
+    }
+
+    .mini-cover {
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background-size: cover;
+      background-position: center;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--color-text-secondary, #666);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .mini-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0.3;
+      color: #fff;
+      transition: opacity 0.2s ease;
+      border-radius: 50%;
+    }
+
+    .mini-player:hover .mini-overlay {
+      opacity: 1;
+    }
+
+    .mini-expand-btn {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      font-size: 10px;
+      line-height: 1;
+      opacity: 0.7;
+      user-select: none;
+    }
+
+    .mini-expand-btn:hover {
+      opacity: 1;
+      transform: scale(1.1);
+    }
+
+    .progress-ring {
+      position: absolute;
+      top: 0;
+      left: 0;
+      transform: rotate(-90deg);
+      pointer-events: none;
+    }
+
+    .progress-ring__circle {
+      transition: stroke-dashoffset 0.1s linear;
+    }
+
+    .sleep-status {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-block);
+      padding: var(--space-block) var(--space-inline);
+      border-top: 1px solid var(--color-border, #e8e8e8);
+      background: rgba(22, 119, 255, 0.05);
+      color: var(--color-primary, #1677ff);
+      font-size: 0.75rem;
+    }
+
+    .media-wrap.is-video {
+      background: #000;
+      border-radius: var(--radius-md, 8px) var(--radius-md, 8px) 0 0;
+      overflow: hidden;
+    }
+
+    .media-wrap.is-video.video-hidden {
+      display: none;
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      max-height: 420px;
+      object-fit: contain;
+    }
+
+    @media (max-width: 767px) {
+      video {
+        max-height: min(420px, 40dvh);
+      }
+      .nav-buttons,
+      .action-buttons {
+        gap: 2px;
+      }
+    }
+
+    audio {
+      display: none;
+    }
+
+    :host([mode='fixed']) .media-wrap.is-video {
+      position: fixed;
+      bottom: 82px;
+      left: 16px;
+      width: 280px;
+      height: 158px;
+      border-radius: var(--radius-md, 8px);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+      overflow: hidden;
+      background: #000;
+      z-index: 1000;
+    }
+
+    :host([mode='fixed'][collapsed]) .media-wrap.is-video {
+      display: none;
+    }
+
+    :host([mode='mini']) .media-wrap {
+      position: absolute;
+      width: 0;
+      height: 0;
+      opacity: 0;
+      pointer-events: none;
+      overflow: hidden;
+    }
+  `;
+
+  @property({ type: String, reflect: true })
+  mode: MediaPlayerMode = 'normal';
+
+  @property({ type: Object })
+  controlsConfig: MediaControlsConfig = defaultControlConfig;
+
+  @property({ type: Boolean })
+  disabled = false;
+
+  @property({ attribute: false })
+  controller: MediaController | null = null;
+
+  @property({ type: Boolean, reflect: true })
+  collapsed = false;
+
+  @query('video')
+  private _videoElement?: HTMLVideoElement;
+
+  @query('audio')
+  private _audioElement?: HTMLAudioElement;
+
+  @state()
+  private _controllerHost: MediaControllerHost | null = null;
+
+  @state()
+  private _showSettings = false;
+
+  /** Whether the video surface is shown (audio keeps playing when hidden). */
+  @state()
+  private _videoVisible = true;
+
+  private _boundController: MediaController | null = null;
+
+  disconnectedCallback(): void {
+    this.controller?.detachMediaElement();
+    super.disconnectedCallback();
+  }
+
+  resetSettings(): void {
+    this.controller?.resetSettings();
+  }
+
+  protected willUpdate(changed: Map<PropertyKey, unknown>): void {
+    if (changed.has('controlsConfig') && this.controlsConfig.advancedSetting === false) {
+      this._showSettings = false;
+    }
+    if (changed.has('controller') && this.controller !== this._boundController) {
+      if (this._boundController) {
+        this._unbindControllerEvents(this._boundController);
+      }
+      this._boundController = this.controller;
+      if (this.controller) {
+        this._bindControllerEvents(this.controller);
+        if (!this._controllerHost) {
+          this._controllerHost = new MediaControllerHost(this, this.controller);
+        }
+      }
+    }
+  }
+
+  private _bindControllerEvents(ctrl: MediaController) {
+    for (const evtName of FORWARDED_MEDIA_EVENTS) {
+      ctrl.addEventListener(evtName, this._forwardEvent);
+    }
+  }
+
+  private _unbindControllerEvents(ctrl: MediaController) {
+    for (const evtName of FORWARDED_MEDIA_EVENTS) {
+      ctrl.removeEventListener(evtName, this._forwardEvent);
+    }
+  }
+
+  private _forwardEvent = (e: Event) => {
+    this.dispatchEvent(
+      new CustomEvent(e.type, {
+        detail: (e as CustomEvent).detail,
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  };
+
+  protected firstUpdated(): void {
+    this._attachMediaElement();
+  }
+
+  protected updated(): void {
+    this._attachMediaElement();
+  }
+
+  private _setMode(newMode: MediaPlayerMode): void {
+    this.mode = newMode;
+    this.dispatchEvent(
+      new CustomEvent('mode-change', {
+        detail: { mode: newMode },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  private _cycleMode(): void {
+    if (this.mode === 'normal') {
+      this._setMode('fixed');
+      return;
+    }
+    if (this.mode === 'fixed') {
+      this._setMode('mini');
+      return;
+    }
+    this._setMode('normal');
+  }
+
+  private _expandFromMini(e: Event): void {
+    e.stopPropagation();
+    this._cycleMode();
+  }
+
+  private _toggleFixedCollapse(): void {
+    this.collapsed = !this.collapsed;
+  }
+
+  private _toggleVideoVisible(): void {
+    this._videoVisible = !this._videoVisible;
+  }
+
+  private _toggleSettings(): void {
+    this._showSettings = !this._showSettings;
+  }
+
+  private _playPauseTitle(isPlaying: boolean): string {
+    if (supportsKeyboardShortcuts()) {
+      return isPlaying ? msg('暂停 (Space)') : msg('播放 (Space)');
+    }
+    return isPlaying ? msg('暂停') : msg('播放');
+  }
+
+  private _previousSegmentTitle(): string {
+    return supportsKeyboardShortcuts() ? msg('上一句 (←)') : msg('上一句');
+  }
+
+  private _nextSegmentTitle(): string {
+    return supportsKeyboardShortcuts() ? msg('下一句 (→)') : msg('下一句');
+  }
+
+  private _replaySegmentTitle(): string {
+    return supportsKeyboardShortcuts() ? msg('重播本句 (R)') : msg('重播本句');
+  }
+
+  private _renderSliderDropdown(options: {
+    icon?: string;
+    title: string;
+    placement: DropdownPlacement;
+    overlay: TemplateResult;
+    overlayStyle: string;
+    trigger?: TemplateResult;
+  }): TemplateResult {
+    const trigger =
+      options.trigger ??
+      html`
+        <ui-icon-button
+          name="${options.icon ?? ''}"
+          title="${options.title}"
+          size="var(--icon-lg)"
+          ?disabled="${this.disabled}"
+        ></ui-icon-button>
+      `;
+
+    return html`
+      <ui-dropdown
+        trigger="click"
+        placement=${options.placement}
+        .arrow="${true}"
+        ?disabled=${this.disabled}
+        style="${options.overlayStyle}"
+        .zIndex=${this.mode === 'fixed' || this.mode === 'mini'
+          ? Z_INDEX.POPUP_ABOVE_FULLSCREEN
+          : Z_INDEX.DROPDOWN}
+        .overlay=${options.overlay}
+      >
+        ${trigger}
+      </ui-dropdown>
+    `;
+  }
+
+  private _renderRateControl(snapshot: MediaControllerSnapshot): TemplateResult {
+    const rate = Number(snapshot.playbackRate);
+    const maxRate = getMaxPlaybackRate();
+    const rateLabel = `${rate.toFixed(1)}x`;
+    const rateTitle = supportsKeyboardShortcuts() ? `${rateLabel} ([) (])` : `${rateLabel}`;
+    const fast = rate > 1;
+    return this._renderSliderDropdown({
+      title: rateTitle,
+      placement: 'left',
+      trigger: html`
+        <ui-tooltip title="${rateTitle}" ?disabled=${this.disabled}>
+          <button
+            type="button"
+            class="rate-trigger${fast ? ' rate-trigger--fast' : ''}"
+            ?disabled=${this.disabled}
+          >
+            ${rateLabel}
+          </button>
+        </ui-tooltip>
+      `,
+      // Arrow handlers: overlay is rendered into a portal, so method refs would lose `this`.
+      overlay: html`
+        <span
+          class="overlay-panel-label"
+          style=${fast ? 'color: var(--color-warning, #fa8c16);' : ''}
+          >${rateLabel}</span
+        >
+        <ui-slider
+          ?disabled="${this.disabled}"
+          .value=${rate}
+          style="--slider-mark-edge-padding: var(--space-sm);"
+          min=${PLAYBACK_RATE_LIMITS.min}
+          max=${maxRate}
+          step=${PLAYBACK_RATE_LIMITS.step}
+          orientation="horizontal"
+          .marks=${playbackRateMarks(PLAYBACK_RATE_LIMITS.min, maxRate)}
+          .tooltip=${{
+            formatter: (v: number) => `${v.toFixed(1)}x`,
+            placement: 'top',
+          }}
+          @change=${(e: CustomEvent<{ value: number }>) => this._handleRateChange(e)}
+        ></ui-slider>
+      `,
+      overlayStyle:
+        '--dropdown-overlay-min-width: 160px;--dropdown-overlay-padding-block: var(--space-sm); --dropdown-overlay-padding-inline: var(--space-sm);',
+    });
+  }
+
+  private _renderVolumeControl(snapshot: MediaControllerSnapshot): TemplateResult {
+    const volume = Number(snapshot.volume);
+    const maxVolume = getMaxVolumeBoost();
+    const percent = Math.round(volume * 100);
+    const percentTitle = supportsKeyboardShortcuts() ? `${percent}% (↑) (↓)` : `${percent}%`;
+    const boosted = volume > 1;
+    const iconName = volume === 0 ? 'volume-close' : 'volume';
+    return this._renderSliderDropdown({
+      title: percentTitle,
+      placement: 'left',
+      trigger: html`
+        <ui-tooltip title="${percentTitle}" ?disabled=${this.disabled}>
+          <button
+            type="button"
+            class="volume-trigger${boosted ? ' volume-trigger--boosted' : ''}"
+            ?disabled=${this.disabled}
+            aria-label=${percentTitle}
+          >
+            <ui-icon name=${iconName} size="var(--icon-lg)"></ui-icon>
+          </button>
+        </ui-tooltip>
+      `,
+      overlay: html`
+        <span
+          class="overlay-panel-label"
+          style=${boosted ? 'color: var(--color-warning, #fa8c16);' : ''}
+          >${percent}%</span
+        >
+        <ui-slider
+          ?disabled="${this.disabled}"
+          .value=${volume}
+          style="--slider-mark-edge-padding: var(--space-sm);"
+          orientation="horizontal"
+          min="0"
+          max=${maxVolume}
+          step="0.01"
+          .marks=${volumeMarks(0, maxVolume)}
+          .tooltip=${{
+            formatter: (v: number) => `${Math.round(v * 100)}%`,
+            placement: 'top',
+          }}
+          @change=${(e: CustomEvent<{ value: number }>) => this._handleVolumeChange(e)}
+        ></ui-slider>
+      `,
+      overlayStyle:
+        '--dropdown-overlay-min-width: 160px; --dropdown-overlay-padding-block: var(--space-sm); --dropdown-overlay-padding-inline: var(--space-sm);',
+    });
+  }
+
+  render() {
+    const snapshot: MediaControllerSnapshot | undefined = this._controllerHost?.snapshot;
+
+    if (!snapshot?.currentItem) {
+      return html`<div class="surface">
+        <div
+          class="player-body"
+          style="justify-content: center; align-items: center; font-size: 0.875rem; color: var(--color-text-secondary);"
+        >
+          ${msg('未选择媒体')}
+        </div>
+      </div>`;
+    }
+
+    const isVideo = snapshot.currentItem.type === 'video';
+    const progressMax = snapshot.duration > 0 ? snapshot.duration : 0;
+
+    if (this.mode === 'mini') {
+      const progressPercent = snapshot.duration > 0 ? snapshot.currentTime / snapshot.duration : 0;
+      const radius = 22;
+      const circumference = 2 * Math.PI * radius;
+      const strokeDashoffset = circumference * (1 - progressPercent);
+
+      return html`
+        <div class="surface mini-player" title="${snapshot.currentItem.title}">
+          <!-- Hidden media tags so standard flow works -->
+          <div class="media-wrap">
+            ${isVideo
+              ? html`<video playsinline @click="${this._togglePlay}"></video>`
+              : html`<audio></audio>`}
+          </div>
+          <div
+            class="mini-cover"
+            style="background-image: url(${snapshot.currentItem.cover || ''});"
+          >
+            ${!snapshot.currentItem.cover
+              ? html`<ui-icon
+                  name="${isVideo ? 'video' : 'audio'}"
+                  size="var(--icon-xl)"
+                ></ui-icon>`
+              : ''}
+            <div class="mini-overlay">
+              <ui-icon-button
+                name="${snapshot.isPlaying ? 'pause' : 'play'}"
+                size="var(--icon-lg)"
+                title="${this._playPauseTitle(snapshot.isPlaying)}"
+                @click="${this._togglePlay}"
+              ></ui-icon-button>
+              ${this.controlsConfig.switchMode
+                ? html`<div
+                    class="mini-expand-btn"
+                    title="${msg('展开播放器')}"
+                    @click="${this._expandFromMini}"
+                  >
+                    ⛶
+                  </div>`
+                : ''}
+            </div>
+          </div>
+          <svg class="progress-ring" width="50" height="50">
+            <circle
+              class="progress-ring__circle"
+              stroke="var(--color-primary, #1677ff)"
+              stroke-width="3"
+              fill="transparent"
+              r="${radius}"
+              cx="25"
+              cy="25"
+              style="stroke-dasharray: ${circumference}; stroke-dashoffset: ${strokeDashoffset};"
+            />
+          </svg>
+        </div>
+      `;
+    }
+
+    const showSegments = this.controlsConfig.previousNextSegment && snapshot.hasSubtitles;
+    const showReplay = this.controlsConfig.replay && snapshot.hasSubtitles;
+    const showLoopMode = this.controlsConfig.loopMode;
+    const showPauseMode = this.controlsConfig.pauseMode && snapshot.hasSubtitles;
+
+    return html`
+      <div class="surface">
+        ${this.mode === 'normal'
+          ? html` <div
+              class="media-wrap ${isVideo ? 'is-video' : 'is-audio'}${isVideo && !this._videoVisible
+                ? ' video-hidden'
+                : ''}"
+            >
+              ${isVideo
+                ? html`<video playsinline @click="${this._togglePlay}"></video>`
+                : html`<audio></audio>`}
+            </div>`
+          : html` <!-- For fixed mode: video is floated, audio is hidden -->
+              <div
+                class="media-wrap ${isVideo ? 'is-video' : 'is-audio'}${isVideo &&
+                !this._videoVisible
+                  ? ' video-hidden'
+                  : ''}"
+              >
+                ${isVideo
+                  ? html`<video playsinline @click="${this._togglePlay}"></video>`
+                  : html`<audio></audio>`}
+              </div>`}
+
+        <div class="player-body">
+          <!-- Cover Left -->
+          ${snapshot.currentItem.cover
+            ? html`<div class="pic-wrap" @click="${this._togglePlay}">
+                <div
+                  class="cover-art"
+                  style="background-image: url(${snapshot.currentItem.cover || ''});"
+                >
+                  ${!snapshot.currentItem.cover
+                    ? html`<ui-icon
+                        name="${isVideo ? 'video' : 'audio'}"
+                        size="var(--icon-2xl)"
+                      ></ui-icon>`
+                    : ''}
+                  <div class="play-overlay">
+                    <ui-icon
+                      name="${snapshot.isPlaying ? 'pause' : 'play'}"
+                      size="var(--icon-xl)"
+                    ></ui-icon>
+                  </div>
+                </div>
+              </div>`
+            : ''}
+
+          <!-- Info / Progress / Controls Column -->
+          <div class="info-wrap">
+            <div class="info-header">
+              <h3 class="title">${snapshot.currentItem.title}</h3>
+              <div class="time-display">
+                <span class="current">${formatTime(snapshot.currentTime)}</span>
+                <span class="time-separator">/</span>
+                <span class="duration">${formatTime(snapshot.duration)}</span>
+              </div>
+            </div>
+
+            <!-- Progress bar -->
+            <div class="progress-bar-wrap">
+              <ui-slider
+                ?disabled="${this.disabled}"
+                .value=${snapshot.currentTime}
+                min="0"
+                max="${progressMax}"
+                step="0.1"
+                .tooltip=${{ open: false }}
+                @change=${this._handleSeekInput}
+              ></ui-slider>
+            </div>
+
+            <!-- Buttons Row -->
+            <div class="control-row">
+              <div class="nav-buttons">
+                ${this.controlsConfig.previousNextTrack
+                  ? html`<ui-icon-button
+                      name="previous"
+                      title="${msg('上一首')}"
+                      size="var(--icon-lg)"
+                      ?disabled="${!snapshot.canPreviousTrack || this.disabled}"
+                      @click="${this._previousTrack}"
+                    ></ui-icon-button>`
+                  : ''}
+                ${showSegments
+                  ? html`<ui-icon-button
+                      name="backward"
+                      title="${this._previousSegmentTitle()}"
+                      size="var(--icon-lg)"
+                      ?disabled="${!snapshot.canPreviousSegment || this.disabled}"
+                      @click="${this._previousSegment}"
+                    ></ui-icon-button>`
+                  : ''}
+                ${this.controlsConfig.playPause
+                  ? html`<ui-icon-button
+                      name="${snapshot.isPlaying ? 'pause' : 'play'}"
+                      title="${this._playPauseTitle(snapshot.isPlaying)}"
+                      size="var(--icon-xl)"
+                      ?disabled="${this.disabled}"
+                      @click="${this._togglePlay}"
+                    ></ui-icon-button>`
+                  : ''}
+                ${showReplay
+                  ? html`<ui-icon-button
+                      name="replay"
+                      title="${this._replaySegmentTitle()}"
+                      size="var(--icon-lg)"
+                      ?disabled="${!snapshot.canReplaySegment || this.disabled}"
+                      @click="${this._replaySegment}"
+                    ></ui-icon-button>`
+                  : ''}
+                ${showSegments
+                  ? html`<ui-icon-button
+                      name="forward"
+                      title="${this._nextSegmentTitle()}"
+                      size="var(--icon-lg)"
+                      ?disabled="${!snapshot.canNextSegment || this.disabled}"
+                      @click="${this._nextSegment}"
+                    ></ui-icon-button>`
+                  : ''}
+                ${this.controlsConfig.previousNextTrack
+                  ? html`<ui-icon-button
+                      name="next"
+                      title="${msg('下一首')}"
+                      size="var(--icon-lg)"
+                      ?disabled="${!snapshot.canNextTrack || this.disabled}"
+                      @click="${this._nextTrack}"
+                    ></ui-icon-button>`
+                  : ''}
+              </div>
+
+              <div class="action-buttons">
+                ${this.controlsConfig.playbackRate ? this._renderRateControl(snapshot) : ''}
+                ${this.controlsConfig.volume ? this._renderVolumeControl(snapshot) : ''}
+                ${isVideo
+                  ? html`<ui-icon-button
+                      name="${this._videoVisible ? 'video-off' : 'video'}"
+                      title="${this._videoVisible ? msg('隐藏视频') : msg('显示视频')}"
+                      size="var(--icon-lg)"
+                      ?disabled="${this.disabled}"
+                      @click="${this._toggleVideoVisible}"
+                    ></ui-icon-button>`
+                  : ''}
+                ${this.controlsConfig.advancedSetting !== false
+                  ? html`<ui-icon-button
+                      name="setting"
+                      class="settings-toggle-btn ${this._showSettings ? 'active' : ''}"
+                      title="${msg('高级设置')}"
+                      size="var(--icon-lg)"
+                      ?disabled="${this.disabled}"
+                      @click="${this._toggleSettings}"
+                    ></ui-icon-button>`
+                  : ''}
+
+                <!-- Change Mode button -->
+                ${this.controlsConfig.switchMode
+                  ? html`<ui-icon-button
+                      name="media"
+                      title="${msg('切换模式')}"
+                      size="var(--icon-lg)"
+                      @click="${this._cycleMode}"
+                    ></ui-icon-button> `
+                  : ''}
+              </div>
+            </div>
+          </div>
+
+          <!-- Fixed switcher toggle (only in fixed mode) -->
+          <!-- @fixme fixed模式 没有显示icon；定位的问题 -->
+          ${this.mode === 'fixed'
+            ? html` <div class="fixed-switcher" @click="${this._toggleFixedCollapse}">
+                <ui-icon
+                  name="${this.collapsed ? 'play' : 'pause'}"
+                  size="var(--icon-sm)"
+                  style="transform: rotate(90deg);"
+                ></ui-icon>
+              </div>`
+            : ''}
+        </div>
+
+        ${this.controlsConfig.advancedSetting !== false
+          ? html`<div class="settings-panel ${this._showSettings ? 'expanded' : ''}">
+              <div class="settings-grid">
+                ${showLoopMode
+                  ? html`<div class="setting-item">
+                      <span class="setting-label">${msg('循环模式')}</span>
+                      <ui-select
+                        ?disabled="${this.disabled}"
+                        .value=${snapshot.loopMode}
+                        .options=${[
+                          { value: 'none', label: msg('关闭') },
+                          { value: 'single', label: msg('单曲循环') },
+                          {
+                            value: 'segment',
+                            label: msg('单句循环'),
+                            disabled: !snapshot.hasSubtitles,
+                          },
+                          { value: 'list', label: msg('列表循环') },
+                          { value: 'shuffle', label: msg('随机播放') },
+                        ]}
+                        @change=${this._handleLoopModeChange}
+                      ></ui-select>
+                    </div>`
+                  : ''}
+                ${showPauseMode
+                  ? html`
+                      <div class="setting-item">
+                        <span class="setting-label">${msg('单句暂停模式')}</span>
+                        <ui-select
+                          ?disabled="${this.disabled}"
+                          .value=${snapshot.pauseMode}
+                          .options=${[
+                            { value: 'off', label: msg('关闭') },
+                            { value: 'seconds', label: msg('固定时长') },
+                            {
+                              value: 'percentage',
+                              label: msg('句长百分比'),
+                            },
+                          ]}
+                          @change=${this._handlePauseModeChange}
+                        ></ui-select>
+                      </div>
+                      ${snapshot.pauseMode === 'seconds'
+                        ? html`
+                            <div class="setting-item">
+                              <span class="setting-label"
+                                >${msg(str`固定时长（${Number(snapshot.pauseSeconds)}秒）`)}</span
+                              >
+                              <ui-slider
+                                ?disabled="${this.disabled}"
+                                .value=${Number(snapshot.pauseSeconds)}
+                                min="1"
+                                max="30"
+                                step="1"
+                                .marks=${{
+                                  1: '1',
+                                  3: '3',
+                                  5: '5',
+                                  10: '10',
+                                  30: '30',
+                                }}
+                                .tooltip=${{
+                                  formatter: (v: number) => `${v} ${msg('秒')}`,
+                                  placement: 'top',
+                                }}
+                                @change=${this._handlePauseSecondsChange}
+                              ></ui-slider>
+                            </div>
+                          `
+                        : null}
+                      ${snapshot.pauseMode === 'percentage'
+                        ? html`
+                            <div class="setting-item">
+                              <span class="setting-label"
+                                >${msg(str`句长百分比（${Number(snapshot.pausePercent)}%）`)}</span
+                              >
+                              <ui-slider
+                                ?disabled="${this.disabled}"
+                                .value=${Number(snapshot.pausePercent)}
+                                min="100"
+                                max="500"
+                                step="10"
+                                .marks=${{
+                                  100: '100',
+                                  200: '200',
+                                  300: '300',
+                                  400: '400',
+                                  500: '500',
+                                }}
+                                .tooltip=${{
+                                  formatter: (v: number) => `${v}%`,
+                                  placement: 'top',
+                                }}
+                                @change=${this._handlePausePercentChange}
+                              ></ui-slider>
+                            </div>
+                          `
+                        : null}
+                    `
+                  : null}
+                ${this.controlsConfig.sleepMode
+                  ? html`<div class="setting-item">
+                      <span class="setting-label">${msg('睡眠模式')}</span>
+                      <ui-select
+                        ?disabled="${this.disabled}"
+                        .value=${snapshot.sleepMode}
+                        .options=${[
+                          { value: 'off', label: msg('关闭') },
+                          { value: 'minutes', label: msg('定时暂停') },
+                          { value: 'until-end', label: msg('播完本集暂停') },
+                        ]}
+                        @change=${this._handleSleepModeChange}
+                      ></ui-select>
+                    </div>`
+                  : ''}
+                ${snapshot.sleepMode === 'minutes'
+                  ? html`
+                      <div class="setting-item">
+                        <span class="setting-label"
+                          >${msg(str`定时关闭（${Number(snapshot.sleepMinutes)}分钟）`)}</span
+                        >
+                        <ui-slider
+                          ?disabled="${this.disabled}"
+                          .value=${Number(snapshot.sleepMinutes)}
+                          min="1"
+                          max="${MAX_SLEEP_MINUTES}"
+                          step="1"
+                          .marks=${{
+                            0: '0',
+                            10: '10',
+                            20: '20',
+                            30: '30',
+                            60: '60',
+                            [MAX_SLEEP_MINUTES]: `${MAX_SLEEP_MINUTES}`,
+                          }}
+                          .tooltip=${{
+                            formatter: (v: number) => `${v} ${msg('分钟')}`,
+                            placement: 'top',
+                          }}
+                          @change=${this._handleSleepMinutesChange}
+                        ></ui-slider>
+                      </div>
+                    `
+                  : null}
+              </div>
+            </div>`
+          : ''}
+        ${snapshot.sleepActive
+          ? html`
+              <div class="sleep-status">
+                <span>
+                  ${snapshot.sleepMode === 'minutes'
+                    ? msg(str`将在 ${formatTime(snapshot.sleepRemainingSeconds)} 后暂停`)
+                    : msg('将在当前集播放结束后暂停')}
+                </span>
+                <ui-button variant="ghost" @click="${this._cancelSleep}">${msg('取消')}</ui-button>
+              </div>
+            `
+          : null}
+      </div>
+    `;
+  }
+
+  private _handleLoopModeChange(event: CustomEvent<SelectChangeDetail>): void {
+    this.controller?.setLoopMode(
+      event.detail.value as 'none' | 'single' | 'segment' | 'list' | 'shuffle',
+    );
+  }
+
+  private _attachMediaElement(): void {
+    if (!this.controller) {
+      return;
+    }
+
+    const element = this._videoElement ?? this._audioElement;
+    if (element) {
+      this.controller.attachMediaElement(element);
+    }
+  }
+
+  private _togglePlay(): void {
+    void this.controller?.togglePlay();
+  }
+
+  private _previousTrack(): void {
+    this.controller?.previousTrack();
+  }
+
+  private _nextTrack(): void {
+    this.controller?.nextTrack();
+  }
+
+  private _previousSegment(): void {
+    this.controller?.previousSegment();
+  }
+
+  private _nextSegment(): void {
+    this.controller?.nextSegment();
+  }
+
+  private _replaySegment(): void {
+    this.controller?.replaySegment();
+  }
+
+  private _handleSeekInput(event: CustomEvent<{ value: number }>): void {
+    this.controller?.seek(Number(event.detail.value));
+  }
+
+  private _handleRateChange(event: CustomEvent<{ value: number }>): void {
+    this.controller?.setPlaybackRate(Number(event.detail.value));
+  }
+
+  private _handleVolumeChange(event: CustomEvent<{ value: number }>): void {
+    this.controller?.setVolume(Number(event.detail.value));
+  }
+
+  private _handleSleepModeChange(event: CustomEvent<SelectChangeDetail>): void {
+    this.controller?.setSleepMode(event.detail.value as 'off' | 'minutes' | 'until-end');
+  }
+
+  private _handleSleepMinutesChange(event: CustomEvent<{ value: number }>): void {
+    this.controller?.setSleepMinutes(Number(event.detail.value));
+  }
+
+  private _cancelSleep(): void {
+    this.controller?.cancelSleep();
+  }
+
+  private _handlePauseModeChange(event: CustomEvent<SelectChangeDetail>): void {
+    this.controller?.setPauseMode(event.detail.value as 'off' | 'seconds' | 'percentage');
+  }
+
+  private _handlePauseSecondsChange(event: CustomEvent<{ value: number }>): void {
+    this.controller?.setPauseSeconds(Number(event.detail.value));
+  }
+
+  private _handlePausePercentChange(event: CustomEvent<{ value: number }>): void {
+    this.controller?.setPausePercent(Number(event.detail.value));
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'media-player': MediaPlayer;
+  }
+}

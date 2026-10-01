@@ -48,3 +48,8 @@ next-env.d.ts
 /apps/yuansays-words/dist/
 /public/words/
 /public/.words-staging/
+
+# Independently built sentence listening and speaking application
+/apps/yuansays-listen/node_modules/
+/apps/yuansays-listen/dist/
+/public/listen/

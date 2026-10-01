@@ -1,0 +1,822 @@
+/** 字幕/歌词片段，时间单位为秒 */
+export type SubtitleSegment = {
+  id: string;
+  startTime: number;
+  endTime: number;
+  /** 原文 */
+  text: string;
+  /** 译文（双语字幕/歌词时存在） */
+  translation?: string;
+};
+export type SubtitleType = 'srt' | 'lrc';
+
+export type MediaType = 'audio' | 'video';
+
+// 音视频的metadata
+export type MediaItem = {
+  id: string; // 根据filename生成hash，上传时判重
+  title: string; // basename
+  filename: string; // filename
+  size: number;
+  type: MediaType;
+  mimeType: string;
+  duration: number;
+  createdAt: number;
+  /** 文件内容 SHA-256，用于导入判重 */
+  contentHash: string;
+  /** Denormalized: true when this mediaId has a Subtitle Track with segments (list/badge cache). */
+  hasSubtitles: boolean;
+  cover?: string; // 封面图片url
+};
+
+// 音视频的Blob
+export type MediaBlob = {
+  mediaId: string;
+  blob: Blob;
+};
+
+export type SubtitleTrack = {
+  id: string; // hash(mediaId:filename)，与媒体一对一
+  mediaId: string;
+  title: string; // basename
+  filename: string; // filename
+  type: SubtitleType; // srt or lrc
+  /** 字幕原文 SHA-256，用于导入判重（避免 segment id 随机导致误判） */
+  contentHash: string;
+  segments: SubtitleSegment[];
+};
+
+/** 练习类型：听力 / 口语 */
+export type PracticeType = 'listening' | 'speaking';
+/** 听力子模式：自由听 / 辨音 */
+export type ListeningMode = 'free' | 'discrimination';
+/** 口语子模式：影子 / 回声 */
+export type SpeakingMode = 'shadowing' | 'echo';
+
+/**
+ * 影子跟读句间空隙策略。
+ * - compress：录制时跳过字幕自然大 gap，句间约 1s；预览按句同步播放。
+ * - preserve：原音完整播放（含大 gap）；预览连续对照。
+ */
+export type ShadowingGapPolicy = 'compress' | 'preserve';
+
+export const SHADOWING_GAP_POLICY_VALUES: readonly ShadowingGapPolicy[] = [
+  'compress',
+  'preserve',
+] as const;
+
+/**
+ * Default source-text mask when opening practice.
+ * The subtitle panel cycles this for the current visit and does not write it back.
+ * - off: mask off (all source text readable)
+ * - current: mask non-current lines (active Subtitle Segment stays readable)
+ * - all: mask all source text
+ */
+export type SourceMaskMode = 'off' | 'current' | 'all';
+
+export const SOURCE_MASK_MODE_VALUES: readonly SourceMaskMode[] = [
+  'off',
+  'current',
+  'all',
+] as const;
+
+/**
+ * Echo Pronunciation Score prosody basis (settings).
+ * - naturalness: score how natural the learner sounds (no reference audio/profile).
+ * - match: compare Echo takes to the source clip / cached prosody profile ("像原声").
+ */
+export type SpeechScoreProsodyBasis = 'naturalness' | 'match';
+
+export const SPEECH_SCORE_PROSODY_BASIS_VALUES: readonly SpeechScoreProsodyBasis[] = [
+  'naturalness',
+  'match',
+] as const;
+
+/**
+ * Recording-preview waveform word-marker width:
+ * - duration: bar width tracks pronunciation span (end − start)
+ * - compact: text-sized chip capped before the next word
+ */
+export type WordMarkerLayout = 'duration' | 'compact';
+
+export const WORD_MARKER_LAYOUT_VALUES: readonly WordMarkerLayout[] = [
+  'duration',
+  'compact',
+] as const;
+
+/** compress 策略下句间固定等待（毫秒） */
+export const SHADOWING_COMPRESS_GAP_MS = 1000;
+
+/** 练习时长埋点用的模式（= 听力子模式 ∪ 口语子模式） */
+export type PracticeAnalyticsMode = ListeningMode | SpeakingMode;
+
+/** IDB 存量可能仍为 `listening`（自由听的旧值） */
+export type LegacyPracticeAnalyticsMode = PracticeAnalyticsMode | 'listening';
+
+/** 将埋点 mode 归一为当前枚举（旧 `listening` → `free`） */
+export function normalizePracticeAnalyticsMode(
+  mode: LegacyPracticeAnalyticsMode | string,
+): PracticeAnalyticsMode {
+  if (mode === 'listening') return 'free';
+  return mode as PracticeAnalyticsMode;
+}
+
+/** 辨音训练中选中的一条噪声（含独立音量） */
+export type DiscriminationNoiseSelection = {
+  noiseId: string;
+  /** 0–1 */
+  volume: number;
+};
+
+/** 辨音训练会话偏好（跨媒体持久化） */
+export type DiscriminationSettings = {
+  /** 最多 3 条 */
+  selected: DiscriminationNoiseSelection[];
+  /** 速听档位数 1–6 */
+  ladderCount: number;
+  /** 长度与 ladderCount 一致的主轨倍速序列（正向；播放时再镜像回落） */
+  ladderRates: number[];
+};
+
+/** 噪音素材 metadata（独立于 MediaItem，不上歌单/练习主轨） */
+export type NoiseItem = {
+  id: string;
+  title: string;
+  filename: string;
+  size: number;
+  mimeType: string;
+  duration: number;
+  createdAt: number;
+  contentHash: string;
+};
+
+export type NoiseBlob = {
+  noiseId: string;
+  blob: Blob;
+};
+
+/** 一次有效练习会话（写入 IndexedDB） */
+export type PracticeSession = {
+  id: string;
+  mediaId: string;
+  mediaTitle: string;
+  /** 写入时冗余，媒体删除后仍可区分音/视频 */
+  mediaType: MediaType;
+  mediaFilename: string;
+  /** 来自播放列表练习时写入；单曲练习不写 */
+  playlistId?: string;
+  mode: PracticeAnalyticsMode;
+  startedAt: number;
+  endedAt: number;
+  activeMs: number;
+  /** 本地时区 YYYY-MM-DD，便于按日查询 */
+  dateKey: string;
+};
+
+// 录音与原始音频每一片段的对应关系，用于对比回放（时间单位为秒）
+export type PracticeSegment = {
+  id: string; // segment_id
+  sourceStartTime: number; // 原始音频起始时间（秒）
+  sourceEndTime: number; // 原始音频结束时间（秒）
+  recordingStartTime: number; // 录音起始时间（秒）
+  recordingEndTime: number; // 录音结束时间（秒）
+  /** Subtitle Segment 原文快照；存量录音可能缺失 */
+  text?: string;
+  /** Subtitle Segment 译文快照；存量录音可能缺失 */
+  translation?: string;
+};
+
+// 录音的metadata
+export type PracticeRecord = {
+  id: string; // UUID
+  mediaId: string;
+  mediaTitle: string;
+  mediaFilename: string;
+  mode: SpeakingMode;
+  /** echo 模式：对应的字幕句 id，便于按句查询 */
+  segmentId?: string;
+  mimeType: string;
+  createdAt: number;
+  sourceDuration: number; // 本次练习覆盖的原音时长（秒），即 segments 首尾在原音时间轴上的跨度
+  recordingDuration: number; // 录音时长
+  segments: PracticeSegment[];
+  /** 影子跟读：该次录音使用的句间空隙策略；存量录音可能缺失 */
+  gapPolicy?: ShadowingGapPolicy;
+};
+
+// 录音的Blob
+export type PracticeRecordBlob = {
+  recordId: string;
+  blob: Blob;
+};
+
+/** Pronunciation Score status for a Practice Record. */
+export type PronunciationScoreStatus = 'pending' | 'success' | 'failed';
+
+/** Word-level score from the pronunciation API. */
+export type PronunciationWordScore = {
+  word: string;
+  start: number;
+  end: number;
+  score: number;
+};
+
+/** Missing (deleted) token from POST /api/v2/pronunciation/score `details.missing_words`. */
+export type PronunciationMissingWord = {
+  word: string;
+  /** 0-based index into tokenize(LF-normalized reference script). */
+  ref_index: number;
+  /** Half-open `[char_start, char_end)` into LF-normalized reference script. */
+  char_start: number;
+  char_end: number;
+};
+
+/** Extra (inserted) token from POST /api/v2/pronunciation/score `details.extra_words`. */
+export type PronunciationExtraWord = {
+  word: string;
+  /** 0-based index into tokenize(details.transcript) (already LF). */
+  hyp_index: number;
+  /** Half-open `[char_start, char_end)` into details.transcript (already LF). */
+  char_start: number;
+  char_end: number;
+};
+
+/** Misread (replaced) token from POST /api/v2/pronunciation/score `details.misread_words`. */
+export type PronunciationMisreadWord = {
+  expected: string;
+  actual: string;
+  /** 0-based index into tokenize(LF-normalized reference script). */
+  ref_index: number;
+  /** 0-based index into tokenize(details.transcript) (already LF). */
+  hyp_index: number;
+  /** Half-open span into LF-normalized reference script. */
+  ref_char_start: number;
+  ref_char_end: number;
+  /** Half-open span into details.transcript (already LF). */
+  hyp_char_start: number;
+  hyp_char_end: number;
+  /** Learner-recording seconds when word_scores align 1:1 with reference; else null. */
+  start?: number | null;
+  end?: number | null;
+};
+
+/** Match sub-scores from v2 `details.prosody_breakdown.match_breakdown`. */
+export type PronunciationProsodyMatchBreakdown = {
+  duration: number;
+  f0: number;
+  energy: number;
+};
+
+/** Prosody sub-scores from POST /api/v2/pronunciation/score `details.prosody_breakdown`. */
+export type PronunciationProsodyBreakdown = {
+  speed: number;
+  rhythm: number;
+  intonation: number;
+  stress: number;
+  /** v2: naturalness component (not shown in this app's UI). */
+  naturalness?: number;
+  /** v2: match component (not shown in this app's UI). */
+  match?: number;
+  match_breakdown?: PronunciationProsodyMatchBreakdown;
+};
+
+/** Word timing entry inside a cached reference prosody profile. */
+export type ReferenceProsodyProfileWord = {
+  word: string;
+  start: number;
+  end: number;
+  duration_ratio: number;
+};
+
+/**
+ * Cached reference prosody profile from v2 scoring (`details.reference_prosody_profile`).
+ * Used to skip re-sending reference audio on later Echo scores.
+ */
+export type ReferenceProsodyProfile = {
+  version: string;
+  profile_hash: string;
+  reference_duration_sec: number;
+  language: string;
+  reference_text: string;
+  speech_span_sec: number;
+  words: ReferenceProsodyProfileWord[];
+  f0_contour: number[];
+  energy_contour: number[];
+};
+
+/**
+ * IndexedDB row for a cached reference prosody profile (not exported in backup).
+ * Echo stores a single segment id as the cache suffix; Shadowing stores ordered
+ * segment ids joined with `|` (composite key). Both modes reuse the same IDB store.
+ */
+export type StoredReferenceProsodyProfile = {
+  /** `${mediaId}:${segmentId}` where segmentId is the cache suffix (Echo single id or Shadowing composite). */
+  id: string;
+  mediaId: string;
+  /** Echo: single Subtitle Segment id. Shadowing: ordered segment ids joined with `|`. */
+  segmentId: string;
+  profile: ReferenceProsodyProfile;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** Word timing from POST `/api/v1/pronunciation/align` (no score). */
+export type WordTiming = {
+  word: string;
+  start: number;
+  end: number;
+};
+
+/** Timed line for optional segment-aware align (`reference_segments` JSON). */
+export type ReferenceSegmentInput = {
+  id: string;
+  startTime: number;
+  endTime: number;
+  text: string;
+};
+
+/** Per-subtitle-line word timings on the uploaded clip timeline. */
+export type AlignSegmentOutput = {
+  id: string;
+  words: WordTiming[];
+};
+
+export type PronunciationAlignMeta = {
+  model: string;
+  device: string;
+  latency_ms: number;
+  language: string;
+  align_mode?: 'full' | 'segments';
+};
+
+/** HTTP response from POST `/api/v1/pronunciation/align`. */
+export type PronunciationAlignResponse = {
+  reference_text: string;
+  words: WordTiming[];
+  segments?: AlignSegmentOutput[] | null;
+  duration_sec: number;
+  speech_span_sec: number | null;
+  reference_newline: 'lf';
+  meta: PronunciationAlignMeta;
+};
+
+/** How a cached Source Word Alignment row was written. */
+export type SourceWordAlignmentSource = 'segment' | 'batch';
+
+/**
+ * IndexedDB row for forced-aligned source word timings on a Subtitle Segment
+ * (Media absolute timeline). Not exported in backup.
+ */
+export type StoredSourceWordAlignment = {
+  /** `${mediaId}:${segmentId}` */
+  id: string;
+  mediaId: string;
+  segmentId: string;
+  /** Absolute Media source seconds (`clip.start + segment.sourceStartTime`). */
+  words: WordTiming[];
+  referenceText: string;
+  language: string;
+  /** `segment` wins over `batch` when both would write the same key. */
+  source: SourceWordAlignmentSource;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/**
+ * IndexedDB row for forced-aligned word timings on an entire Media file (absolute
+ * Media timeline). Segment views project from this row or use per-segment overrides.
+ * Not exported in backup.
+ */
+export type StoredMediaSourceWordAlignment = {
+  /** Same as `mediaId`. */
+  id: string;
+  mediaId: string;
+  words: WordTiming[];
+  referenceText: string;
+  language: string;
+  /** Subtitle Track `contentHash` at write time; mismatch invalidates projection. */
+  subtitleContentHash: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** Details payload aligned with POST /api/v2/pronunciation/score `details`. */
+export type PronunciationScoreDetails = {
+  transcript: string;
+  word_scores: PronunciationWordScore[];
+  missing_words: PronunciationMissingWord[];
+  extra_words: PronunciationExtraWord[];
+  misread_words: PronunciationMisreadWord[];
+  speech_rate_wpm?: number;
+  pause_count?: number;
+  duration_sec?: number;
+  speech_span_sec?: number;
+  reference_duration_sec?: number;
+  speed_ratio?: number;
+  reference_transcript?: string | null;
+  prosody_breakdown?: PronunciationProsodyBreakdown;
+  /** v2 echo of top-level naturalness (optional; not shown in UI). */
+  prosody_naturalness?: number | null;
+  /** v2 echo of top-level match (optional; not shown in UI). */
+  prosody_match?: number | null;
+  /** Present when the server built a new profile from reference_audio; null when reusing cache. */
+  reference_prosody_profile?: ReferenceProsodyProfile | null;
+  /**
+   * Char-span coordinate system for reference/transcript indices.
+   * Always `"lf"`: server normalizes `\r\n` / `\r` to `\n` before scoring.
+   * Do not use a `details.reference_text` echo (not returned); slice local LF-normalized reference.
+   */
+  reference_newline?: 'lf';
+};
+
+/** Meta payload aligned with POST /api/v2/pronunciation/score `meta`. */
+export type PronunciationScoreMeta = {
+  model: string;
+  device: string;
+  latency_ms: number;
+  reference_source: 'text' | 'audio' | 'profile' | string;
+};
+
+/**
+ * Optional evaluation of a Practice Record (one score per record in MVP).
+ * Stored on-device; not a Practice Session.
+ */
+export type PronunciationScore = {
+  id: string;
+  recordId: string;
+  status: PronunciationScoreStatus;
+  referenceText: string;
+  accuracy?: number;
+  fluency?: number;
+  completeness?: number;
+  prosody?: number;
+  /** v2 naturalness component (stored; not shown in this app's UI). */
+  prosody_naturalness?: number;
+  /** v2 match vs reference prosody (stored; not shown in this app's UI). */
+  prosody_match?: number;
+  overall?: number;
+  details?: PronunciationScoreDetails;
+  meta?: PronunciationScoreMeta;
+  errorCode?: number;
+  errorMessage?: string;
+  createdAt: number;
+  scoredAt?: number;
+};
+
+/** Successful JSON body from POST /api/v2/pronunciation/score. */
+export type PronunciationScoreApiResponse = {
+  accuracy: number;
+  fluency: number;
+  completeness: number;
+  prosody: number;
+  prosody_naturalness?: number | null;
+  prosody_match?: number | null;
+  overall: number;
+  details: PronunciationScoreDetails;
+  meta: PronunciationScoreMeta;
+};
+
+export type LoopMode = 'none' | 'single' | 'segment' | 'list' | 'shuffle';
+
+export type SleepMode = 'off' | 'minutes' | 'until-end';
+
+export type PauseMode = 'off' | 'seconds' | 'percentage';
+
+/** 播放器布局模式 */
+export type MediaPlayerMode = 'normal' | 'fixed' | 'mini';
+
+/**
+ * 控制面板各控件的显示配置。
+ * 所有字段默认为 true；设为 false 则隐藏对应控件。
+ * 注意：previousNextSegment / replay / pauseMode 还需要 snapshot.hasSubtitles 为 true 才会显示。
+ */
+export interface MediaControlsConfig {
+  /** 进度条与时间 */
+  progress?: boolean;
+  /** 播放 / 暂停按钮 */
+  playPause?: boolean;
+  /** 上一首 / 下一首 */
+  previousNextTrack?: boolean;
+  /** 上一句 / 下一句（需同时有字幕才生效） */
+  previousNextSegment?: boolean;
+  /** 重播本句（需同时有字幕才生效） */
+  replay?: boolean;
+  /** 循环模式选择 */
+  loopMode?: boolean;
+  /** 倍速选择 */
+  playbackRate?: boolean;
+  /** 音量调节 */
+  volume?: boolean;
+  /** 睡眠模式 */
+  sleepMode?: boolean;
+  /** 句间暂停（需同时有字幕才生效） */
+  pauseMode?: boolean;
+  /** 切换模式 normal fixed mini */
+  switchMode?: boolean;
+  /** 是否显示高级设置（齿轮按钮及设置抽屉） */
+  advancedSetting?: boolean;
+}
+
+/** 路由上下文， 参考 lit-element-router/lit-element-router.d.ts */
+export interface RouteContext {
+  route: string; // 路由名称
+  params: {
+    [key: string]: string;
+  }; // 路由参数
+  query: {
+    [key: string]: string;
+  }; // 路由查询参数
+  data: object; // 路由数据
+}
+
+export type PlaylistKind = 'favorites' | 'user';
+
+/** Entry in a playlist — references media + soft-deletion state. */
+export type PlaylistEntry = {
+  mediaId: string;
+  /** True when user removes from list or source media is deleted. Hidden in UI; omitted from backup export. */
+  removed: boolean;
+  /** Snapshot of title when added (used when re-adding). */
+  titleSnapshot?: string;
+};
+
+export type Playlist = {
+  id: string; // e.g. SHA-256('favorites') or randomUUID()
+  name: string;
+  kind: PlaylistKind;
+  sortOrder: number;
+  /** Ordered entries; soft-deleted (`removed`) stay in DB for re-add but are hidden in UI. */
+  entries: PlaylistEntry[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type AppSettings = {
+  maxRecordingsPerMedia: number;
+  maxEchoPerSegment: number;
+  maxStorageMB: number;
+  lowStorageThresholdPercent: number;
+  /** Default loop mode when opening practice / playback. */
+  defaultLoopMode: LoopMode;
+  /** Default sleep timer duration (minutes) when sleep mode is enabled. */
+  defaultSleepMinutes: number;
+  /** Default pause between subtitle segments as % of segment duration. */
+  repeatPausePercent: number;
+  /** Default source volume (0–1) in recording preview / sync playback. */
+  defaultSourceVolume: number;
+  /** Default volume (0–1) when newly selecting a noise track in discrimination. */
+  defaultNoiseVolume: number;
+  /** Max logical volume multiplier for media / recording preview (1 = 100%, 3 = 300%). */
+  maxVolumeBoost: number;
+  /** Max playback rate for media player / practice (1 = 1x, 4 = 4x). */
+  maxPlaybackRate: number;
+  /** When true, recording countdown overlay is skipped. */
+  skipRecordingCountdown: boolean;
+  /** Seconds shown before recording when countdown is not skipped (Echo and Shadowing). */
+  recordingCountdownSeconds: number;
+  /** When true, shadowing mode tips modal is skipped. */
+  skipShadowingTips: boolean;
+  /** 影子跟读句间空隙：compress（默认）或 preserve。 */
+  shadowingGapPolicy: ShadowingGapPolicy;
+  /** When true, echo mode tips modal is skipped. */
+  skipEchoTips: boolean;
+  /** When true, discrimination mode tips modal is skipped. */
+  skipDiscriminationTips: boolean;
+  /**
+   * Source-text mask applied when a practice page opens.
+   * In-session subtitle-panel / M changes stay on that visit only.
+   */
+  sourceMaskMode: SourceMaskMode;
+  /**
+   * When true, enable browser echoCancellation (AEC) on the practice mic.
+   * Helps speaker/phone use; may clip Shadowing takes. Default off (headphones).
+   */
+  reduceSpeakerEcho: boolean;
+  /** ID of the last playlist loaded into practice. */
+  lastPlayedPlaylistId: string;
+  /** ID of the last Media loaded into practice (single or playlist). */
+  lastPlayedMediaId: string;
+  /** 辨音训练偏好（噪声选择 + 速听阶梯） */
+  discrimination: DiscriminationSettings;
+  /** Full POST URL for pronunciation scoring (`…/api/v2/pronunciation/score`). */
+  speechScoreApiUrl: string;
+  /** Full POST URL for source word alignment (`…/api/v1/pronunciation/align`). */
+  speechAlignApiUrl: string;
+  /** Pronunciation scoring API key (sent as X-API-Key). */
+  speechScoreApiKey: string;
+  /** Default BCP-47 language for scoring; `auto` lets the server detect. */
+  speechScoreLanguage: string;
+  /**
+   * Echo Pronunciation Score prosody basis.
+   * - `naturalness` (default): text + duration only; no reference audio/profile upload.
+   * - `match`: Echo may send clipped reference audio or a cached prosody profile.
+   */
+  speechScoreProsodyBasis: SpeechScoreProsodyBasis;
+  /**
+   * Waveform word-marker layout in recording preview (toggled in preview UI, not settings page).
+   * Default `duration`.
+   */
+  wordMarkerLayout: WordMarkerLayout;
+  /**
+   * Library sub-routes pinned into the app nav.
+   * Noise is not pinnable. Empty by default.
+   */
+  pinnedLibraryRoutes: PinnableLibraryRoute[];
+};
+
+/** Library collection routes that may appear in the app nav. Hub order, Noise excluded. */
+export const PINNABLE_LIBRARY_ROUTE_VALUES = [
+  'library-media',
+  'library-playlists',
+  'library-sentences',
+  'library-records',
+] as const;
+
+export type PinnableLibraryRoute = (typeof PINNABLE_LIBRARY_ROUTE_VALUES)[number];
+
+export const FAVORITES_PLAYLIST_ID =
+  'f42d0f9e4b0ec07df97f58277cd5e5ae2cde973c0bf96ae598827e4da1c3bad1';
+
+/** Saved sentence metadata (audio blob stored separately). */
+export type SentenceBankEntry = {
+  id: string;
+  /** Dedup key: normalize(text)+translation+mediaId+startTime */
+  contentHash: string;
+  text: string;
+  translation?: string;
+  sourceMediaId: string;
+  sourceSegmentId: string;
+  sourceStartTime: number;
+  sourceEndTime: number;
+  sourceTitleSnapshot: string;
+  /** Snapshot of source media type at save time (for icon / filter after media deletion). */
+  sourceMediaType: MediaType;
+  /** False when source media was deleted; clipped audio may still exist. */
+  sourceAvailable: boolean;
+  /** True when user removes from sentence bank. Hidden in UI; omitted from backup export. */
+  removed: boolean;
+  createdAt: number;
+};
+
+export type SentenceBankBlob = {
+  entryId: string;
+  blob: Blob;
+  mimeType: string;
+  duration: number;
+};
+
+/** Absolute playback-rate range for the media player slider / hotkeys. */
+export const PLAYBACK_RATE_LIMITS = {
+  min: 0.1,
+  max: 4,
+  step: 0.1,
+} as const;
+
+/** Discrete rates offered in discrimination ladder UI (up to 4x). */
+export const DISCRIMINATION_RATE_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4] as const;
+
+export const DISCRIMINATION_MAX_NOISE_TRACKS = 3;
+export const DISCRIMINATION_LADDER_COUNT_MIN = 1;
+export const DISCRIMINATION_LADDER_COUNT_MAX = 6;
+
+export const DEFAULT_DISCRIMINATION_SETTINGS: DiscriminationSettings = {
+  selected: [],
+  ladderCount: 1,
+  ladderRates: [1],
+};
+
+export const LOOP_MODE_VALUES: readonly LoopMode[] = [
+  'none',
+  'single',
+  'segment',
+  'list',
+  'shuffle',
+] as const;
+
+export const DEFAULT_SETTINGS: AppSettings = {
+  maxRecordingsPerMedia: 5,
+  maxEchoPerSegment: 10,
+  maxStorageMB: 200,
+  lowStorageThresholdPercent: 10,
+  defaultLoopMode: 'none',
+  defaultSleepMinutes: 30,
+  repeatPausePercent: 100,
+  defaultSourceVolume: 1,
+  defaultNoiseVolume: 0.5,
+  maxVolumeBoost: 2,
+  maxPlaybackRate: 2,
+  skipRecordingCountdown: false,
+  recordingCountdownSeconds: 3,
+  skipShadowingTips: false,
+  shadowingGapPolicy: 'compress',
+  skipEchoTips: false,
+  skipDiscriminationTips: false,
+  sourceMaskMode: 'off',
+  reduceSpeakerEcho: false,
+  lastPlayedPlaylistId: '',
+  lastPlayedMediaId: '',
+  discrimination: { ...DEFAULT_DISCRIMINATION_SETTINGS, ladderRates: [1] },
+  speechScoreApiUrl: '',
+  speechAlignApiUrl: '',
+  speechScoreApiKey: '',
+  speechScoreLanguage: 'auto',
+  speechScoreProsodyBasis: 'naturalness',
+  wordMarkerLayout: 'duration',
+  pinnedLibraryRoutes: [],
+};
+
+/** Allowed ranges for persisted storage / quota numeric fields. */
+export const APP_SETTINGS_LIMITS = {
+  maxRecordingsPerMedia: { min: 1, max: 20 },
+  maxEchoPerSegment: { min: 1, max: 50 },
+  maxStorageMB: { min: 50, max: 2000 },
+  lowStorageThresholdPercent: { min: 5, max: 50 },
+} as const;
+
+/** Allowed ranges for player / practice default numeric fields. */
+export const RECORDING_COUNTDOWN_SECONDS_LIMITS = { min: 3, max: 10 } as const;
+
+export const APP_SETTINGS_PLAYER_LIMITS = {
+  defaultSleepMinutes: { min: 1, max: 90 },
+  recordingCountdownSeconds: { ...RECORDING_COUNTDOWN_SECONDS_LIMITS, step: 1 },
+  repeatPausePercent: { min: 100, max: 500, step: 10 },
+  defaultSourceVolume: { min: 0, max: 1, step: 0.05 },
+  defaultNoiseVolume: { min: 0, max: 1, step: 0.05 },
+  maxVolumeBoost: { min: 1, max: 3, step: 0.1 },
+  maxPlaybackRate: { min: 1, max: PLAYBACK_RATE_LIMITS.max, step: PLAYBACK_RATE_LIMITS.step },
+} as const;
+
+export const DISCRIMINATION_LADDER_COUNT_LIMITS = {
+  min: DISCRIMINATION_LADDER_COUNT_MIN,
+  max: DISCRIMINATION_LADDER_COUNT_MAX,
+} as const;
+
+export type ImportError = {
+  filename: string;
+  message: string;
+};
+
+export type ImportConflictKind = 'media-content' | 'media-title' | 'subtitle-content';
+
+/** 导入冲突：需用户选择覆盖或跳过 */
+export type ImportConflict = {
+  kind: ImportConflictKind;
+  filename: string;
+  message: string;
+  /** 将被覆盖的已有媒体 id */
+  existingMediaId: string;
+  title?: string;
+  mediaType?: MediaType;
+};
+
+export type ImportOptions = {
+  /** 同 filename 内容不同时允许覆盖的 media id */
+  overwriteMediaIds?: string[];
+  /** 同 title+type 不同后缀时允许覆盖，格式 `${title}::${type}` */
+  overwriteTitleTypes?: string[];
+  /** 允许覆盖字幕的 media id */
+  overwriteSubtitleMediaIds?: string[];
+};
+
+/** 用户对单条导入冲突的选择 */
+export type ConflictDecision = {
+  conflict: ImportConflict;
+  /** true=覆盖，false=跳过 */
+  overwrite: boolean;
+};
+
+export type ImportResult = {
+  imported: Array<MediaItem | SubtitleTrack>;
+  errors: ImportError[];
+  /** 可继续导入时的解析告警（如跳过了个别坏行） */
+  warnings: ImportError[];
+  skipped: ImportError[];
+  conflicts: ImportConflict[];
+};
+
+export type SortDirection = 'asc' | 'desc';
+
+export type ErrorLogSource =
+  | 'window.onerror'
+  | 'unhandledrejection'
+  | 'reportError'
+  | 'console.error';
+
+/** 持久化到 IndexedDB 的异常日志条目（仅 metadata） */
+export type ErrorLogEntry = {
+  id: string;
+  createdAt: number;
+  message: string;
+  name?: string;
+  stack?: string;
+  cause?: string;
+  source: ErrorLogSource;
+  appVersion: string;
+  commitHash: string;
+  userAgent: string;
+  locale: string;
+  route: string;
+  href: string;
+  offline: boolean;
+  extra?: Record<string, unknown>;
+};

@@ -1,0 +1,566 @@
+import { msg, localized } from '@lit/localize';
+import { css, html, LitElement, nothing } from 'lit';
+import { keyed } from 'lit/directives/keyed.js';
+import { customElement, property, state } from 'lit/decorators.js';
+import { navigator } from 'lit-element-router';
+
+import { MediaController } from '../../controllers/media-controller.js';
+import { loadSentenceForPractice, sentenceToLoadedTrack } from '../../lib/media-loader.js';
+import { reportError } from '../../lib/error-reporter.js';
+import {
+  PLAYBACK_RATE_HOTKEY_STEP,
+  VOLUME_HOTKEY_STEP,
+  getHotkeyCatalog,
+  getHotkeyManager,
+  supportsKeyboardShortcuts,
+} from '../../lib/hotkeys/index.js';
+import type {
+  MediaControlsConfig,
+  RouteContext,
+  SentenceBankEntry,
+  PracticeType,
+} from '../../types/models.js';
+import { Message } from '../../components/ui/message.js';
+import { Loading } from '../../components/ui/loading.js';
+import type {
+  RecordingErrorDetail,
+  RecordingStateChangeDetail,
+} from '../../components/player/audio-recorder.js';
+import {
+  canRecordWithMicrophone,
+  checkMicrophoneStatus,
+  getMicrophoneBlockedMessage,
+  invalidateMicrophoneStatusCache,
+  isRecordingSupported,
+  type MicrophoneStatus,
+} from '../../lib/microphone-access.js';
+
+import '../../components/ui/alert.js';
+import '../../components/ui/button.js';
+import '../../components/ui/icon-button.js';
+import '../../components/ui/modal.js';
+import '../../components/player/media-player.js';
+import '../../components/player/audio-recorder.js';
+
+const SENTENCE_PLAYER_CONTROLS: MediaControlsConfig = {
+  progress: true,
+  playPause: true,
+  playbackRate: true,
+  volume: true,
+  loopMode: false,
+  sleepMode: false,
+  pauseMode: false,
+  previousNextTrack: false,
+  previousNextSegment: false,
+  replay: true,
+  switchMode: false,
+  advancedSetting: false,
+};
+
+const NavigatorElement = navigator(LitElement);
+
+@customElement('sentence-practice-page')
+@localized()
+export class SentencePracticePage extends NavigatorElement {
+  static styles = css`
+    :host {
+      display: block;
+    }
+
+    .page {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-inline);
+      max-width: 720px;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-block);
+    }
+
+    .header h2 {
+      margin: 0;
+      font-size: 1.125rem;
+      font-weight: 600;
+    }
+
+    .card {
+      background: var(--color-surface, #fff);
+      border: 1px solid var(--color-border, #d9d9d9);
+      border-radius: var(--radius-lg, 12px);
+      padding: var(--space-inline);
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-inline);
+    }
+
+    .sentence-text {
+      margin: 0;
+      font-size: 1.25rem;
+      font-weight: 600;
+      line-height: 1.5;
+    }
+
+    .sentence-translation {
+      margin: 0;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+    }
+
+    .meta {
+      margin: 0;
+      font-size: 0.8125rem;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.45));
+    }
+
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-sm);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--space-sm);
+    }
+
+    .recorder {
+      margin-top: var(--space-sm);
+    }
+
+    .hotkeys-help-body {
+      display: grid;
+      gap: var(--space-inline);
+    }
+
+    .hotkeys-help-list {
+      display: grid;
+      gap: var(--space-xs);
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .hotkeys-help-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-block);
+      font-size: 0.875rem;
+    }
+
+    .hotkeys-help-label {
+    }
+
+    .hotkeys-help-scope {
+      font-size: 0.75rem;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+    }
+
+    .hotkeys-help-code {
+      flex-shrink: 0;
+      min-width: 3.5rem;
+      padding: 0.125rem 0.5rem;
+      border: 1px solid var(--color-border, #d9d9d9);
+      border-radius: var(--radius-sm, 4px);
+      background: var(--color-surface-secondary, #f5f5f5);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.8125rem;
+      text-align: center;
+    }
+
+    .hotkeys-help-note {
+      margin: 0;
+      font-size: 0.8125rem;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+    }
+  `;
+
+  @property({ type: Object })
+  routeContext: RouteContext = {
+    route: '',
+    params: {},
+    query: {},
+    data: {},
+  };
+
+  @state()
+  private _entry: SentenceBankEntry | null = null;
+
+  @state()
+  private _mode: PracticeType = 'listening';
+
+  @state()
+  private _error = '';
+
+  @state()
+  private _hotkeysHelpOpen = false;
+
+  @state()
+  private _recording = false;
+
+  @state()
+  private _micStatus: MicrophoneStatus = 'prompt';
+
+  private readonly _controller = new MediaController();
+  private _didLoad = false;
+  private readonly _recordingSupported = isRecordingSupported();
+  private _micPermissionStatus: PermissionStatus | null = null;
+
+  private get _canUseMicrophone(): boolean {
+    return this._recordingSupported && canRecordWithMicrophone(this._micStatus);
+  }
+
+  private get _micDisabledTitle(): string {
+    return getMicrophoneBlockedMessage(this._recordingSupported ? this._micStatus : 'unsupported');
+  }
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    document.addEventListener('visibilitychange', this._onVisibilityChange);
+    void this._attachMicPermissionListener();
+    void this._refreshMicStatus();
+    if (supportsKeyboardShortcuts()) {
+      getHotkeyManager().registerScope({
+        id: 'sentence-practice',
+        enabled: () => this._sentencePracticeHotkeysEnabled(),
+        handlers: {
+          togglePlay: () => {
+            if (!this._sentencePracticeMediaHotkeysEnabled()) return;
+            void this._controller.togglePlay();
+          },
+          replaySegment: () => {
+            if (!this._sentencePracticeMediaHotkeysEnabled()) return;
+            this._controller.replaySegment();
+          },
+          volumeUp: () => {
+            if (!this._sentencePracticeMediaHotkeysEnabled()) return;
+            this._nudgeVolume(VOLUME_HOTKEY_STEP);
+          },
+          volumeDown: () => {
+            if (!this._sentencePracticeMediaHotkeysEnabled()) return;
+            this._nudgeVolume(-VOLUME_HOTKEY_STEP);
+          },
+          rateUp: () => {
+            if (!this._sentencePracticeMediaHotkeysEnabled()) return;
+            this._nudgePlaybackRate(PLAYBACK_RATE_HOTKEY_STEP);
+          },
+          rateDown: () => {
+            if (!this._sentencePracticeMediaHotkeysEnabled()) return;
+            this._nudgePlaybackRate(-PLAYBACK_RATE_HOTKEY_STEP);
+          },
+          toggleHotkeysHelp: () => {
+            this._toggleHotkeysHelp();
+          },
+        },
+      });
+    }
+  }
+
+  disconnectedCallback(): void {
+    if (supportsKeyboardShortcuts()) {
+      getHotkeyManager().unregisterScope('sentence-practice');
+    }
+    document.removeEventListener('visibilitychange', this._onVisibilityChange);
+    this._micPermissionStatus?.removeEventListener('change', this._onMicPermissionChange);
+    this._micPermissionStatus = null;
+    this.shadowRoot?.querySelector('audio-recorder')?.destroy();
+    this._controller.destroy();
+    super.disconnectedCallback();
+  }
+  protected updated(changed: Map<PropertyKey, unknown>): void {
+    if (!changed.has('routeContext') && this._didLoad) {
+      return;
+    }
+    this._didLoad = true;
+    void this._load();
+  }
+
+  private _getEntryId(): string {
+    const value = this.routeContext.query?.id;
+    return typeof value === 'string' ? value.trim() : '';
+  }
+
+  private async _load(): Promise<void> {
+    const entryId = this._getEntryId();
+    if (!entryId) {
+      this._error = msg('缺少句子 ID');
+      return;
+    }
+
+    const loading = Loading.service({ text: msg('加载句子中…') });
+    try {
+      const loaded = await loadSentenceForPractice(entryId);
+      if (!loaded) {
+        this._error = msg('该句子不存在或无法加载');
+        this._entry = null;
+        return;
+      }
+
+      this._error = '';
+      this._entry = loaded.entry;
+      await this._controller.loadTracks([sentenceToLoadedTrack(loaded)]);
+      // Single-clip practice should not inherit app defaults like segment loop.
+      this._controller.setLoopMode('none');
+    } catch (error) {
+      void reportError(error, { where: 'sentence-practice-page.load', entryId });
+      this._error = msg('加载失败，请重试');
+    } finally {
+      loading.close();
+    }
+  }
+
+  private _viewSource(): void {
+    const entry = this._entry;
+    if (!entry) {
+      return;
+    }
+    if (!entry.sourceAvailable) {
+      Message.warning(msg('源媒体已删除，无法查看来源'));
+      return;
+    }
+    const query = new URLSearchParams({
+      mediaId: entry.sourceMediaId,
+      segmentId: entry.sourceSegmentId,
+    });
+    this.navigate(`/listen/practice?${query.toString()}`);
+  }
+
+  private _backToBank(): void {
+    this.navigate('/listen/library/sentences');
+  }
+
+  private _sentencePracticeHotkeysEnabled(): boolean {
+    if (this._recording) {
+      return false;
+    }
+    return true;
+  }
+
+  private _sentencePracticeMediaHotkeysEnabled(): boolean {
+    return !this._hotkeysHelpOpen && !this._recording;
+  }
+
+  private _nudgeVolume(delta: number): void {
+    const current = this._controller.getSnapshot().volume;
+    this._controller.setVolume(current + delta);
+  }
+
+  private _nudgePlaybackRate(delta: number): void {
+    const current = this._controller.getSnapshot().playbackRate;
+    this._controller.setPlaybackRate(current + delta);
+  }
+
+  private _pauseMediaBeforeRecording = (): void => {
+    if (this._controller.getSnapshot().isPlaying) {
+      void this._controller.pause();
+    }
+  };
+
+  private _onRecordingStateChange = (event: CustomEvent<RecordingStateChangeDetail>): void => {
+    this._recording = event.detail.recording;
+  };
+
+  private _onRecordingError = (event: CustomEvent<RecordingErrorDetail>): void => {
+    Message.error(event.detail.message);
+    invalidateMicrophoneStatusCache();
+    void this._refreshMicStatus({ force: true });
+  };
+
+  private _onVisibilityChange = (): void => {
+    if (document.visibilityState === 'visible') {
+      void this._refreshMicStatus();
+    }
+  };
+
+  private _onMicPermissionChange = (): void => {
+    invalidateMicrophoneStatusCache();
+    void this._refreshMicStatus({ force: true });
+  };
+
+  private async _attachMicPermissionListener(): Promise<void> {
+    try {
+      const status = await globalThis.navigator.permissions?.query({
+        name: 'microphone' as PermissionName,
+      });
+      if (!status) {
+        return;
+      }
+      this._micPermissionStatus = status;
+      status.addEventListener('change', this._onMicPermissionChange);
+    } catch {
+      // Permissions API may not support microphone query in this browser.
+    }
+  }
+
+  private async _refreshMicStatus(options: { force?: boolean } = {}): Promise<void> {
+    const status = await checkMicrophoneStatus(options);
+    if (this._micStatus !== status) {
+      this._micStatus = status;
+    }
+  }
+
+  private _setMode(mode: PracticeType): void {
+    this._mode = mode;
+    if (mode === 'speaking') {
+      void this._refreshMicStatus();
+    }
+  }
+
+  private _toggleHotkeysHelp = (): void => {
+    this._hotkeysHelpOpen = !this._hotkeysHelpOpen;
+  };
+
+  private _openHotkeysHelp = (): void => {
+    this._hotkeysHelpOpen = true;
+  };
+
+  private _closeHotkeysHelp = (): void => {
+    this._hotkeysHelpOpen = false;
+  };
+
+  private _renderHotkeysHelpModal() {
+    if (!this._hotkeysHelpOpen) {
+      return nothing;
+    }
+
+    const catalog = getHotkeyCatalog(['sentence-practice']);
+
+    return html`
+      <ui-modal
+        .open=${true}
+        .title=${msg('快捷键')}
+        .centered=${true}
+        .footer=${false}
+        ok-text="${msg('知道了')}"
+        @update:open=${(e: CustomEvent<{ open: boolean }>) => {
+          if (e.target !== e.currentTarget) {
+            return;
+          }
+          if (!e.detail.open) {
+            this._closeHotkeysHelp();
+          }
+        }}
+      >
+        <div class="hotkeys-help-body">
+          <ul class="hotkeys-help-list">
+            ${catalog.map(
+              (row) => html`
+                <li class="hotkeys-help-row">
+                  <span class="hotkeys-help-label">
+                    <span>${row.actionLabel}</span>
+                    ${row.scopeNote
+                      ? html`<span class="hotkeys-help-scope">（${row.scopeNote}）</span>`
+                      : nothing}
+                  </span>
+                  <kbd class="hotkeys-help-code">${row.codeLabel}</kbd>
+                </li>
+              `,
+            )}
+          </ul>
+          <p class="hotkeys-help-note">${msg('暂不支持自定义快捷键。')}</p>
+        </div>
+        <div slot="footer">
+          <ui-button variant="primary" @click=${this._closeHotkeysHelp}>${msg('知道了')}</ui-button>
+        </div>
+      </ui-modal>
+    `;
+  }
+
+  render() {
+    const entry = this._entry;
+    return html`
+      <div class="page">
+        <div class="header">
+          <h2>${msg('句子练习')}</h2>
+          <div class="actions">
+            ${supportsKeyboardShortcuts()
+              ? html`<ui-icon-button
+                  name="help"
+                  title=${msg('快捷键 (H)')}
+                  size="var(--icon-lg)"
+                  @click=${this._openHotkeysHelp}
+                ></ui-icon-button>`
+              : nothing}
+            <ui-button variant="secondary" @click=${this._backToBank}>${msg('返回句库')}</ui-button>
+            <ui-button
+              variant="secondary"
+              ?disabled=${!entry?.sourceAvailable}
+              @click=${this._viewSource}
+            >
+              ${msg('查看来源')}
+            </ui-button>
+          </div>
+        </div>
+
+        ${this._error ? html`<ui-alert type="error">${this._error}</ui-alert>` : nothing}
+        ${!entry
+          ? nothing
+          : html`
+              <section class="card">
+                <p class="sentence-text">${entry.text}</p>
+                ${entry.translation
+                  ? html`<p class="sentence-translation">${entry.translation}</p>`
+                  : nothing}
+                <p class="meta">
+                  ${msg('来自')}：${entry.sourceTitleSnapshot}
+                  ${entry.sourceAvailable ? nothing : html` · ${msg('源媒体已删除')}`}
+                </p>
+
+                <div class="tabs">
+                  <ui-button
+                    variant="${this._mode === 'listening' ? 'primary' : 'secondary'}"
+                    @click=${() => this._setMode('listening')}
+                  >
+                    ${msg('听力')}
+                  </ui-button>
+                  <ui-button
+                    variant="${this._mode === 'speaking' ? 'primary' : 'secondary'}"
+                    @click=${() => this._setMode('speaking')}
+                  >
+                    ${msg('口语')}
+                  </ui-button>
+                </div>
+              </section>
+
+              <media-player
+                .controller=${this._controller}
+                ?disabled=${this._recording}
+                mode="normal"
+                .controlsConfig=${SENTENCE_PLAYER_CONTROLS}
+              ></media-player>
+
+              ${this._mode === 'speaking'
+                ? html`<div class="recorder">
+                    ${keyed(
+                      entry.id,
+                      html`<audio-recorder
+                        .controller=${this._controller}
+                        .collectSegments=${false}
+                        .countdownBeforeStart=${false}
+                        .autoPlayOnStart=${false}
+                        .disabled=${!this._recordingSupported || !this._canUseMicrophone}
+                        .disabledTitle=${this._micDisabledTitle}
+                        .beforeRecordingStart=${this._pauseMediaBeforeRecording}
+                        @recording-state-change=${this._onRecordingStateChange}
+                        @recording-error=${this._onRecordingError}
+                      ></audio-recorder>`,
+                    )}
+                  </div>`
+                : nothing}
+            `}
+        ${this._renderHotkeysHelpModal()}
+      </div>
+    `;
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'sentence-practice-page': SentencePracticePage;
+  }
+}

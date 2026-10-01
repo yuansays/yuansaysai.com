@@ -1,0 +1,334 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import {
+  APP_SETTINGS_STORAGE_KEY,
+  DEFAULT_USER_SETTINGS,
+  getAppSettings,
+  getMaxPlaybackRate,
+  getMaxVolumeBoost,
+  getRecordingCountdownSeconds,
+  getUserSettings,
+  normalizeAppSettings,
+  normalizeDiscriminationSettings,
+  setAppSettings,
+  setUserSettings,
+  shouldSkipDiscriminationTips,
+  shouldSkipEchoTips,
+  shouldSkipRecordingCountdown,
+  shouldSkipShadowingTips,
+  shouldReduceSpeakerEcho,
+  USER_SETTINGS_STORAGE_KEY,
+} from './app-settings.js';
+import { DEFAULT_SETTINGS } from '../types/models.js';
+
+describe('app-settings', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it('returns defaults when storage is empty', () => {
+    expect(getAppSettings()).toEqual(DEFAULT_SETTINGS);
+    expect(getUserSettings()).toEqual(DEFAULT_USER_SETTINGS);
+    expect(shouldSkipRecordingCountdown()).toBe(false);
+    expect(getRecordingCountdownSeconds()).toBe(3);
+    expect(shouldSkipShadowingTips()).toBe(false);
+    expect(shouldSkipEchoTips()).toBe(false);
+    expect(shouldReduceSpeakerEcho()).toBe(false);
+  });
+
+  it('persists tip preferences via setAppSettings', () => {
+    setAppSettings({ skipRecordingCountdown: true, skipShadowingTips: true });
+    expect(getAppSettings().skipRecordingCountdown).toBe(true);
+    expect(getAppSettings().skipShadowingTips).toBe(true);
+    expect(shouldSkipRecordingCountdown()).toBe(true);
+    expect(shouldSkipShadowingTips()).toBe(true);
+  });
+
+  it('persists reduceSpeakerEcho for practice mic echoCancellation', () => {
+    expect(getAppSettings().reduceSpeakerEcho).toBe(false);
+    setAppSettings({ reduceSpeakerEcho: true });
+    expect(getAppSettings().reduceSpeakerEcho).toBe(true);
+    expect(shouldReduceSpeakerEcho()).toBe(true);
+    setAppSettings({ reduceSpeakerEcho: false });
+    expect(shouldReduceSpeakerEcho()).toBe(false);
+  });
+
+  it('clamps numeric settings to allowed ranges', () => {
+    const next = setAppSettings({
+      maxRecordingsPerMedia: 999,
+      maxEchoPerSegment: 0,
+      maxStorageMB: 10,
+      lowStorageThresholdPercent: 99,
+      repeatPausePercent: 123,
+      defaultSleepMinutes: 0,
+      defaultSourceVolume: 2,
+      defaultNoiseVolume: -1,
+      maxVolumeBoost: 5,
+      maxPlaybackRate: 9,
+    });
+    expect(next.maxRecordingsPerMedia).toBe(20);
+    expect(next.maxEchoPerSegment).toBe(1);
+    expect(next.maxStorageMB).toBe(50);
+    expect(next.lowStorageThresholdPercent).toBe(50);
+    expect(next.repeatPausePercent).toBe(120);
+    expect(next.defaultSleepMinutes).toBe(1);
+    expect(next.defaultSourceVolume).toBe(1);
+    expect(next.defaultNoiseVolume).toBe(0);
+    expect(next.maxVolumeBoost).toBe(3);
+    expect(next.maxPlaybackRate).toBe(4);
+  });
+
+  it('clamps recording countdown seconds to 3–10', () => {
+    expect(setAppSettings({ recordingCountdownSeconds: 2 }).recordingCountdownSeconds).toBe(3);
+    expect(setAppSettings({ recordingCountdownSeconds: 11 }).recordingCountdownSeconds).toBe(10);
+    expect(setAppSettings({ recordingCountdownSeconds: 7 }).recordingCountdownSeconds).toBe(7);
+    expect(getRecordingCountdownSeconds()).toBe(7);
+  });
+
+  it('parses default loop mode', () => {
+    expect(normalizeAppSettings({ defaultLoopMode: 'invalid' }).defaultLoopMode).toBe('none');
+    setAppSettings({ defaultLoopMode: 'segment' });
+    expect(getAppSettings().defaultLoopMode).toBe('segment');
+  });
+
+  it('parses shadowing gap policy with compress default', () => {
+    expect(getAppSettings().shadowingGapPolicy).toBe('compress');
+    expect(normalizeAppSettings({ shadowingGapPolicy: 'invalid' }).shadowingGapPolicy).toBe(
+      'compress',
+    );
+    setAppSettings({ shadowingGapPolicy: 'preserve' });
+    expect(getAppSettings().shadowingGapPolicy).toBe('preserve');
+  });
+
+  it('parses source mask mode with off default', () => {
+    expect(getAppSettings().sourceMaskMode).toBe('off');
+    expect(normalizeAppSettings({ sourceMaskMode: 'nope' }).sourceMaskMode).toBe('off');
+    setAppSettings({ sourceMaskMode: 'current' });
+    expect(getAppSettings().sourceMaskMode).toBe('current');
+    setAppSettings({ sourceMaskMode: 'all' });
+    expect(getAppSettings().sourceMaskMode).toBe('all');
+  });
+
+  it('migrates legacy user-settings once', () => {
+    localStorage.setItem(
+      USER_SETTINGS_STORAGE_KEY,
+      JSON.stringify({ skipEchoTips: true, skipRecordingCountdown: true }),
+    );
+    const settings = getAppSettings();
+    expect(settings.skipEchoTips).toBe(true);
+    expect(settings.skipRecordingCountdown).toBe(true);
+    expect(localStorage.getItem(APP_SETTINGS_STORAGE_KEY)).toBeTruthy();
+    expect(localStorage.getItem(USER_SETTINGS_STORAGE_KEY)).toBeNull();
+  });
+
+  it('keeps setUserSettings compatibility', () => {
+    setUserSettings({ skipShadowingTips: true, skipEchoTips: true });
+    expect(getUserSettings().skipShadowingTips).toBe(true);
+    expect(getUserSettings().skipEchoTips).toBe(true);
+    expect(shouldSkipShadowingTips()).toBe(true);
+    expect(shouldSkipEchoTips()).toBe(true);
+  });
+
+  it('falls back for invalid JSON', () => {
+    localStorage.setItem(APP_SETTINGS_STORAGE_KEY, '{not-json');
+    expect(getAppSettings()).toEqual(DEFAULT_SETTINGS);
+  });
+
+  it('normalizeAppSettings clamps backup payloads', () => {
+    const normalized = normalizeAppSettings({
+      maxRecordingsPerMedia: 3,
+      skipRecordingCountdown: true,
+      unknown: true,
+    });
+    expect(normalized.maxRecordingsPerMedia).toBe(3);
+    expect(normalized.skipRecordingCountdown).toBe(true);
+    expect(normalized.maxStorageMB).toBe(DEFAULT_SETTINGS.maxStorageMB);
+  });
+
+  it('does not prefill last played playlist or media by default', () => {
+    expect(getAppSettings().lastPlayedPlaylistId).toBe('');
+    expect(getAppSettings().lastPlayedMediaId).toBe('');
+  });
+
+  it('persists lastPlayedPlaylistId when provided', () => {
+    setAppSettings({ lastPlayedPlaylistId: 'playlist-42' });
+    expect(getAppSettings().lastPlayedPlaylistId).toBe('playlist-42');
+  });
+
+  it('persists lastPlayedMediaId when provided', () => {
+    setAppSettings({ lastPlayedMediaId: 'media-42' });
+    expect(getAppSettings().lastPlayedMediaId).toBe('media-42');
+  });
+
+  it('persists pronunciation scoring API settings', () => {
+    setAppSettings({
+      speechScoreApiUrl: ' https://speech.example.com/api/v1/pronunciation/score ',
+      speechScoreApiKey: ' secret ',
+      speechScoreLanguage: 'en',
+      speechScoreProsodyBasis: 'match',
+    });
+    expect(getAppSettings().speechScoreApiUrl).toBe(
+      'https://speech.example.com/api/v1/pronunciation/score',
+    );
+    expect(getAppSettings().speechScoreApiKey).toBe('secret');
+    expect(getAppSettings().speechScoreLanguage).toBe('en');
+    expect(getAppSettings().speechScoreProsodyBasis).toBe('match');
+  });
+
+  it('persists speech align URL as trimmed literal without path rewriting', () => {
+    setAppSettings({
+      speechAlignApiUrl: ' https://speech.example.com/api/v1/pronunciation/alig ',
+    });
+    expect(getAppSettings().speechAlignApiUrl).toBe(
+      'https://speech.example.com/api/v1/pronunciation/alig',
+    );
+    setAppSettings({
+      speechScoreApiUrl: 'https://speech.example.com/api/v2/pronunciation/score',
+      speechAlignApiUrl: '',
+    });
+    expect(getAppSettings().speechAlignApiUrl).toBe('');
+  });
+
+  it('defaults speechScoreProsodyBasis to naturalness and rejects unknown values', () => {
+    expect(getAppSettings().speechScoreProsodyBasis).toBe('naturalness');
+    localStorage.setItem(
+      APP_SETTINGS_STORAGE_KEY,
+      JSON.stringify({
+        ...DEFAULT_SETTINGS,
+        speechScoreProsodyBasis: 'not-a-basis',
+      }),
+    );
+    expect(getAppSettings().speechScoreProsodyBasis).toBe('naturalness');
+  });
+
+  it('keeps pinnable library routes in hub order and drops Noise', () => {
+    expect(getAppSettings().pinnedLibraryRoutes).toEqual([]);
+    setAppSettings({
+      pinnedLibraryRoutes: [
+        'library-records',
+        'library-media',
+        'library-sentences',
+        'library-playlists',
+        'library-noise' as 'library-media',
+      ],
+    });
+    expect(getAppSettings().pinnedLibraryRoutes).toEqual([
+      'library-media',
+      'library-playlists',
+      'library-sentences',
+      'library-records',
+    ]);
+    localStorage.setItem(
+      APP_SETTINGS_STORAGE_KEY,
+      JSON.stringify({
+        ...DEFAULT_SETTINGS,
+        pinnedLibraryRoutes: ['library-media', 'library-media', 'library-playlists'],
+      }),
+    );
+    expect(getAppSettings().pinnedLibraryRoutes).toEqual(['library-media', 'library-playlists']);
+    localStorage.setItem(
+      APP_SETTINGS_STORAGE_KEY,
+      JSON.stringify({ ...DEFAULT_SETTINGS, pinnedLibraryRoutes: 'library-media' }),
+    );
+    expect(getAppSettings().pinnedLibraryRoutes).toEqual([]);
+  });
+
+  it('defaults wordMarkerLayout to duration and rejects unknown values', () => {
+    expect(getAppSettings().wordMarkerLayout).toBe('duration');
+    setAppSettings({ wordMarkerLayout: 'compact' });
+    expect(getAppSettings().wordMarkerLayout).toBe('compact');
+    localStorage.setItem(
+      APP_SETTINGS_STORAGE_KEY,
+      JSON.stringify({
+        ...DEFAULT_SETTINGS,
+        wordMarkerLayout: 'not-a-layout',
+      }),
+    );
+    expect(getAppSettings().wordMarkerLayout).toBe('duration');
+  });
+
+  it('migrates legacy speechScoreApiBaseUrl to the full v2 score path', () => {
+    localStorage.setItem(
+      APP_SETTINGS_STORAGE_KEY,
+      JSON.stringify({
+        ...DEFAULT_SETTINGS,
+        speechScoreApiBaseUrl: 'https://speech.example.com/',
+      }),
+    );
+    expect(getAppSettings().speechScoreApiUrl).toBe(
+      'https://speech.example.com/api/v2/pronunciation/score',
+    );
+  });
+
+  it('keeps an already-saved v1 score URL unchanged', () => {
+    localStorage.setItem(
+      APP_SETTINGS_STORAGE_KEY,
+      JSON.stringify({
+        ...DEFAULT_SETTINGS,
+        speechScoreApiUrl: 'https://speech.example.com/api/v1/pronunciation/score',
+      }),
+    );
+    expect(getAppSettings().speechScoreApiUrl).toBe(
+      'https://speech.example.com/api/v1/pronunciation/score',
+    );
+  });
+
+  it('exposes max volume boost and playback rate from persisted settings', () => {
+    setAppSettings({ maxVolumeBoost: 2.5, maxPlaybackRate: 3 });
+    expect(getMaxVolumeBoost()).toBe(2.5);
+    expect(getMaxPlaybackRate()).toBe(3);
+  });
+
+  it('normalizes discrimination settings and merges partial updates', () => {
+    const normalized = normalizeDiscriminationSettings({
+      selected: [
+        { noiseId: 'n1', volume: 2 },
+        { noiseId: '', volume: 0.5 },
+        { noiseId: 'n2', volume: 0.3 },
+        { noiseId: 'n3', volume: 0.1 },
+        { noiseId: 'n4', volume: 0.1 },
+      ],
+      ladderCount: 99,
+      ladderRates: [0.3, 1.25, 9],
+    });
+    expect(normalized.selected).toEqual([
+      { noiseId: 'n1', volume: 1 },
+      { noiseId: 'n2', volume: 0.3 },
+      { noiseId: 'n3', volume: 0.1 },
+    ]);
+    expect(normalized.ladderCount).toBe(6);
+    expect(normalized.ladderRates).toHaveLength(6);
+
+    setAppSettings({
+      discrimination: {
+        selected: [{ noiseId: 'rain', volume: 0.6 }],
+        ladderCount: 2,
+      },
+    });
+    const settings = getAppSettings();
+    expect(settings.discrimination.selected).toEqual([{ noiseId: 'rain', volume: 0.6 }]);
+    expect(settings.discrimination.ladderCount).toBe(2);
+    expect(shouldSkipDiscriminationTips()).toBe(false);
+    setAppSettings({ skipDiscriminationTips: true });
+    expect(shouldSkipDiscriminationTips()).toBe(true);
+  });
+
+  it('returns default discrimination settings for non-object input', () => {
+    expect(normalizeDiscriminationSettings(null).selected).toEqual([]);
+    expect(normalizeDiscriminationSettings(undefined).ladderCount).toBe(1);
+    expect(normalizeDiscriminationSettings('bad').selected).toEqual([]);
+  });
+
+  it('ignores invalid legacy user-settings payloads', () => {
+    localStorage.setItem(USER_SETTINGS_STORAGE_KEY, '{bad-json');
+    expect(getAppSettings()).toEqual(DEFAULT_SETTINGS);
+
+    localStorage.clear();
+    localStorage.setItem(USER_SETTINGS_STORAGE_KEY, JSON.stringify('not-an-object'));
+    expect(getAppSettings()).toEqual(DEFAULT_SETTINGS);
+  });
+});

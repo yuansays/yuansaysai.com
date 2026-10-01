@@ -1,0 +1,24 @@
+export type {
+  HotkeyAction,
+  HotkeyBinding,
+  HotkeyHandler,
+  HotkeyScope,
+  HotkeyScopeId,
+} from './types.js';
+export { shouldIgnoreHotkey } from './guards.js';
+export {
+  PRACTICE_HOTKEY_BINDINGS,
+  RECORDING_PREVIEW_HOTKEY_BINDINGS,
+  findActionForCode,
+  getBindingsForScope,
+} from './default-map.js';
+export { HotkeyManager, getHotkeyManager, setHotkeyManagerForTests } from './hotkey-manager.js';
+export { KEYBOARD_SHORTCUTS_MQ, supportsKeyboardShortcuts } from './support.js';
+export type { HotkeyCatalogRow } from './catalog.js';
+export {
+  PLAYBACK_RATE_HOTKEY_STEP,
+  VOLUME_HOTKEY_STEP,
+  formatHotkeyCodeLabel,
+  getHotkeyActionLabel,
+  getHotkeyCatalog,
+} from './catalog.js';

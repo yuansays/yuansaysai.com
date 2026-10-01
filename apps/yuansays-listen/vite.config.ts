@@ -1,0 +1,221 @@
+/// <reference types="vitest/config" />
+
+import { execSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { defineConfig, type Plugin } from 'vite';
+import { VitePWA } from 'vite-plugin-pwa';
+import basicSsl from '@vitejs/plugin-basic-ssl';
+
+const rootDir = dirname(fileURLToPath(import.meta.url));
+const lanHost = Boolean(process.env.VITE_DEV_HOST);
+const lanSsl = Boolean(process.env.VITE_DEV_SSL);
+
+/** Local mkcert files under `certs/` (gitignored). Prefer over basicSsl when present. */
+function loadMkcertHttps(): { cert: Buffer; key: Buffer } | undefined {
+  const certDir = resolve(rootDir, 'certs');
+  if (!existsSync(certDir)) return undefined;
+  const keyName = readdirSync(certDir).find((name) => name.endsWith('-key.pem'));
+  if (!keyName) return undefined;
+  const certName = keyName.replace(/-key\.pem$/, '.pem');
+  const certPath = resolve(certDir, certName);
+  const keyPath = resolve(certDir, keyName);
+  if (!existsSync(certPath)) return undefined;
+  return { cert: readFileSync(certPath), key: readFileSync(keyPath) };
+}
+
+const mkcertHttps = lanSsl ? loadMkcertHttps() : undefined;
+
+/**
+ * Vitest's vi.mock resolves relative paths with an importer taken from the
+ * call stack. With Vite's module runner that importer is often a root-relative
+ * URL (`/src/...`), a `file://` URL, or a Windows path whose drive letter casing
+ * differs from the module graph (`d:` vs `D:`). Any of those causes the mock
+ * registry key to miss the loaded module, so tests get the real export.
+ *
+ * Normalize importers to filesystem paths and lowercase Windows drive letters
+ * on resolved ids so mock registration and module lookup share one key.
+ */
+function normalizeVitestMockImporter(): Plugin {
+  function lowercaseDrive(p: string): string {
+    return p.replace(/^([A-Za-z]):/, (_, d: string) => `${d.toLowerCase()}:`);
+  }
+
+  function toFsImporter(importer: string): string | undefined {
+    const bare = importer.replace(/[?#].*$/, '');
+    if (bare.startsWith('file:')) {
+      try {
+        return fileURLToPath(bare);
+      } catch {
+        return undefined;
+      }
+    }
+    if (bare.startsWith('/@fs/')) {
+      return bare.slice('/@fs/'.length);
+    }
+    // Stack / Vite URL shaped like /D:/path/...
+    if (/^\/[A-Za-z]:\//.test(bare)) {
+      return bare.slice(1);
+    }
+    // Root-relative Vite URL (/src/foo.ts). On Windows Node treats "/src/..." as
+    // absolute, so detect by leading slash without a drive letter.
+    if (bare.startsWith('/') && !bare.startsWith('/@') && !/^[A-Za-z]:/.test(bare.slice(1))) {
+      return resolve(rootDir, bare.slice(1));
+    }
+    return undefined;
+  }
+
+  return {
+    name: 'normalize-vitest-mock-importer',
+    enforce: 'pre',
+    async resolveId(id, importer, options) {
+      if (!importer || (!id.startsWith('./') && !id.startsWith('../'))) {
+        return;
+      }
+      const fsImporter = lowercaseDrive((toFsImporter(importer) ?? importer).replace(/\\/g, '/'));
+      const resolved = await this.resolve(id, fsImporter, {
+        ...options,
+        skipSelf: true,
+      });
+      if (!resolved) {
+        return;
+      }
+      const normalizedId = lowercaseDrive(resolved.id.replace(/\\/g, '/'));
+      if (normalizedId === resolved.id) {
+        return resolved;
+      }
+      return { ...resolved, id: normalizedId };
+    },
+  };
+}
+
+function readPackageVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(rootDir, 'package.json'), 'utf8')) as {
+      version?: string;
+    };
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+function readCommitHash(): string {
+  const fromEnv = process.env.GITHUB_SHA?.trim() || process.env.COMMIT_HASH?.trim();
+  if (fromEnv) {
+    return fromEnv.slice(0, 7);
+  }
+  try {
+    return execSync('git rev-parse --short HEAD', {
+      cwd: rootDir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
+export default defineConfig({
+  base: '/listen/',
+  ...(lanHost
+    ? {
+        server: {
+          host: true,
+          ...(mkcertHttps ? { https: mkcertHttps } : {}),
+        },
+        preview: {
+          host: true,
+          ...(mkcertHttps ? { https: mkcertHttps } : {}),
+        },
+      }
+    : {}),
+  // Vite 8 uses Oxc (not esbuild). Lit needs:
+  // 1) legacy decorators lowered (otherwise `@customElement` / `@property` stay in output)
+  // 2) class fields as assign (`this.x = …`), not define — matches tsconfig
+  //    `useDefineForClassFields: false`, so Lit's reactive accessors are not shadowed
+  //    (otherwise `@state` updates never re-render; e.g. stuck「加载中」).
+  oxc: {
+    decorator: { legacy: true },
+    typescript: {
+      removeClassFieldsWithoutInitializer: true,
+    },
+    assumptions: {
+      setPublicClassFields: true,
+    },
+  },
+  define: {
+    __APP_VERSION__: JSON.stringify(readPackageVersion()),
+    __COMMIT_HASH__: JSON.stringify(readCommitHash()),
+    __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
+  build: {
+    outDir: 'dist',
+    sourcemap: false,
+  },
+  plugins: [
+    normalizeVitestMockImporter(),
+    VitePWA({
+      registerType: 'prompt',
+      scope: '/listen/',
+      manifest: {
+        name: 'yuansays 听说练习',
+        short_name: '听说练习',
+        description: '逐句听力、跟读录音与原声对照。',
+        id: '/listen/',
+        scope: '/listen/',
+        start_url: '/listen/',
+        display: 'standalone',
+        background_color: '#1677ff',
+        theme_color: '#1677ff',
+        lang: 'zh-CN',
+        dir: 'ltr',
+        icons: [
+          {
+            src: 'icons/icon-192.png',
+            sizes: '192x192',
+            type: 'image/png',
+            purpose: 'any',
+          },
+          {
+            src: 'icons/icon-512.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'any',
+          },
+          {
+            src: 'icons/icon-maskable-512.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'maskable',
+          },
+        ],
+      },
+      workbox: {
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}', 'manifest.webmanifest'],
+        globIgnores: ['**/release-notes.json'],
+        navigateFallback: 'index.html',
+        navigateFallbackDenylist: [/^\/api/, /^\/(?!listen\/)/],
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+      },
+      devOptions: {
+        enabled: false,
+      },
+    }),
+    // Fall back to self-signed basicSsl only when mkcert files are missing.
+    ...(lanSsl && !mkcertHttps ? [basicSsl()] : []),
+  ],
+  test: {
+    environment: 'happy-dom',
+    setupFiles: ['src/test/setup.ts'],
+    include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html', 'lcov'],
+      reportsDirectory: './coverage',
+      include: ['src/**/*.ts'],
+      exclude: ['src/**/*.test.ts', 'src/test/**', 'src/locales/**', 'src/main.ts', 'src/types/**'],
+    },
+  },
+});

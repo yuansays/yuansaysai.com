@@ -1,0 +1,1114 @@
+import { msg, str, localized } from '@lit/localize';
+import { css, html, LitElement, nothing } from 'lit';
+import { customElement, property, state } from 'lit/decorators.js';
+import { keyed } from 'lit/directives/keyed.js';
+
+import {
+  deleteMedia,
+  deleteMediaBatch,
+  getMediaList,
+  deleteSubtitle,
+  toggleFavorites,
+  getPlaylist,
+  getPlaylistList,
+  addMediaToPlaylist,
+  addMediaBatchToPlaylist,
+  createPlaylist,
+  isPlaylistNameConflictError,
+} from '../../db/service.js';
+
+import { reportError } from '../../lib/error-reporter.js';
+import { getAppSettings, setAppSettings } from '../../lib/app-settings.js';
+import {
+  findImportedSubtitleTrack,
+  runSubtitleImport,
+  subtitleBasenameMatchesMedia,
+  type PendingSubtitleImport,
+} from '../../lib/subtitle-import-helpers.js';
+import { formatTime, formatDate } from '../../lib/playback-utils.js';
+import { estimateListNaturalHeight, type ListMetricsDetail } from '../../lib/split-list-heights.js';
+import { NARROW_VIEWPORT_MQ } from '../../lib/layout-compact.js';
+import { FAVORITES_PLAYLIST_ID, type MediaItem, type SortDirection } from '../../types/models.js';
+import '../ui/alert.js';
+import '../ui/button.js';
+import '../ui/popconfirm.js';
+import '../ui/icon.js';
+import '../ui/tooltip.js';
+import '../ui/virtual-grid.js';
+import '../ui/dropdown.js';
+import type { DropdownMenuClickDetail, DropdownMenuItem } from '../ui/dropdown.js';
+import '../ui/modal.js';
+import '../ui/input.js';
+import type { InputChangeDetail } from '../ui/input.js';
+import { Message } from '../ui/message.js';
+import { reportSubtitleImportResult } from '../import/subtitle-import-feedback.js';
+
+const CREATE_PLAYLIST_MENU_KEY = '__create__';
+
+/** Row height including the --space-md (12px) gap below each card. */
+const MEDIA_ROW_HEIGHT = 96;
+/** Narrow: meta + actions stacked; includes the same gap below each card. */
+const MEDIA_ROW_HEIGHT_NARROW = 100;
+const MEDIA_LIST_HEIGHT = 480;
+
+@customElement('media-list')
+@localized()
+export class MediaList extends LitElement {
+  static styles = css`
+    :host {
+      display: block;
+    }
+
+    :host([fill-height]) {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 0;
+    }
+
+    :host([fill-height]) section {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+    }
+
+    :host([fill-height]) .list-viewport {
+      flex: 1;
+      min-height: 0;
+    }
+
+    :host([fill-height]) .list-viewport ui-virtual-grid {
+      display: block;
+      height: 100%;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-block);
+      margin-bottom: var(--space-block);
+      flex-shrink: 0;
+    }
+
+    .header h2 {
+      margin: 0;
+      font-size: 1.125rem;
+      font-weight: 600;
+    }
+
+    .count {
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+      font-size: 0.875rem;
+    }
+
+    .selection-chrome {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-sm);
+      margin-bottom: var(--space-block);
+      flex-shrink: 0;
+    }
+
+    .selection-chrome .header {
+      margin-bottom: 0;
+    }
+
+    .selection-count {
+      margin: 0;
+      font-size: 1.125rem;
+      font-weight: 600;
+    }
+
+    .batch-controls {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: var(--space-sm);
+    }
+
+    .item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--space-md);
+      align-items: center;
+      /* Reserve --space-md to match MEDIA_ROW_HEIGHT gap (fixed, not --space-block). */
+      height: calc(100% - var(--space-md));
+      padding: var(--space-md) var(--space-lg);
+      background: var(--color-surface, #fff);
+      border: 1px solid var(--color-border, #d9d9d9);
+      border-radius: var(--radius-md, 8px);
+      box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.06));
+      box-sizing: border-box;
+    }
+
+    .meta {
+      min-width: 0;
+    }
+
+    .title {
+      margin: 0 0 var(--space-xs);
+      font-size: 1rem;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .details {
+      display: flex;
+      flex-wrap: nowrap;
+      align-items: center;
+      gap: var(--space-sm);
+      margin: 0;
+      min-width: 0;
+      overflow: hidden;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+      font-size: 0.8125rem;
+    }
+
+    .details > span {
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+
+    .details > .date {
+      flex-shrink: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      color: var(--color-primary, #1677ff);
+      font-weight: 500;
+    }
+
+    .actions {
+      display: flex;
+      gap: var(--space-sm);
+      flex-shrink: 0;
+    }
+
+    .favorite-btn {
+      color: #faad14;
+      transition: transform 0.2s ease;
+    }
+
+    .favorite-btn.active {
+      color: #fa8c16;
+    }
+
+    .favorite-btn:hover {
+      transform: scale(1.1);
+    }
+
+    .empty {
+      padding: var(--space-stack);
+      text-align: center;
+      color: var(--color-text-secondary, rgba(0, 0, 0, 0.65));
+      background: var(--color-surface, #fff);
+      border: 1px dashed var(--color-border, #d9d9d9);
+      border-radius: var(--radius-md, 8px);
+    }
+
+    .error {
+      margin-bottom: var(--space-block);
+    }
+
+    .batch-checkbox {
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+      cursor: pointer;
+      accent-color: var(--color-primary, #1677ff);
+    }
+
+    :host([selection-mode]) .item {
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      cursor: pointer;
+    }
+
+    input[type='file'] {
+      display: none;
+    }
+
+    @media (max-width: 767px) {
+      .item {
+        grid-template-columns: 1fr;
+        align-items: start;
+        align-content: start;
+        gap: var(--space-xs);
+        height: calc(100% - var(--space-xs));
+        padding: var(--space-sm) var(--space-md);
+      }
+
+      /* Override desktop 3-col selection layout so actions stay on their own row. */
+      :host([selection-mode]) .item {
+        grid-template-columns: auto minmax(0, 1fr);
+      }
+
+      :host([selection-mode]) .actions {
+        grid-column: 1 / -1;
+      }
+
+      .details {
+        gap: var(--space-xs);
+      }
+
+      .actions {
+        gap: var(--space-xs);
+        justify-content: flex-end;
+      }
+    }
+  `;
+
+  @property({ type: String })
+  keyword?: string;
+
+  @property({ type: String })
+  sortBy?: string = 'date';
+
+  @property({ type: String })
+  sortDirection?: SortDirection = 'desc';
+
+  /** When set, only the first N items after filter/sort are shown (e.g. recent 10 on home). */
+  @property({ type: Number })
+  limit?: number;
+
+  /** Fill parent height and scroll inside the list instead of using a fixed max height. */
+  @property({ type: Boolean, reflect: true, attribute: 'fill-height' })
+  fillHeight = false;
+
+  @property({ type: Boolean, reflect: true, attribute: 'selection-mode' })
+  selectionMode = false;
+
+  @property({ type: Boolean, attribute: 'hide-manage' })
+  hideManage = false;
+
+  @state()
+  private _selected = new Set<string>();
+
+  @state()
+  private _batchDeleting = false;
+
+  @state()
+  private _batchAddingToPlaylist = false;
+
+  @state()
+  private _items: MediaItem[] = [];
+
+  @state()
+  private _loading = true;
+
+  @state()
+  private _error = '';
+
+  @state()
+  private _deletingId = '';
+
+  @state()
+  private _importingSubtitleId = '';
+
+  @state()
+  private _favoriteStates = new Map<string, boolean>();
+
+  /** User playlists only (favorites appear separately in the add-to-playlist menu). */
+  @state()
+  private _playlists: Array<{ id: string; name: string }> = [];
+
+  @state()
+  private _narrow = false;
+
+  @state()
+  private _lastPlayedMediaId = '';
+
+  @state()
+  private _createPlaylistModalOpen = false;
+
+  @state()
+  private _createPlaylistName = '';
+
+  @state()
+  private _createPlaylistBusy = false;
+
+  @state()
+  private _mismatchConfirmOpen = false;
+
+  private _pendingSubtitleMediaId = '';
+  private _pendingSubtitleOverwrite = false;
+  private _pendingMismatchImport: PendingSubtitleImport | null = null;
+
+  /** Media IDs to add after creating a playlist (single-row or batch). */
+  private _createPlaylistMediaIds: string[] = [];
+
+  private _visibleIds: string[] = [];
+
+  private _visibleSelected = new Set<string>();
+
+  private _visibleCount = 0;
+
+  private _lastMetricsKey = '';
+
+  private _narrowMq?: MediaQueryList;
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    this._lastPlayedMediaId = getAppSettings().lastPlayedMediaId;
+    this._narrowMq = window.matchMedia(NARROW_VIEWPORT_MQ);
+    this._narrow = this._narrowMq.matches;
+    this._narrowMq.addEventListener('change', this._onNarrowMqChange);
+    void this.refresh();
+  }
+
+  disconnectedCallback(): void {
+    this._narrowMq?.removeEventListener('change', this._onNarrowMqChange);
+    super.disconnectedCallback();
+  }
+
+  private _onNarrowMqChange = (e: MediaQueryListEvent) => {
+    this._narrow = e.matches;
+  };
+
+  private _rowHeight(): number {
+    return this._narrow ? MEDIA_ROW_HEIGHT_NARROW : MEDIA_ROW_HEIGHT;
+  }
+
+  protected updated(): void {
+    const rowHeight = this._rowHeight();
+    const naturalHeight = estimateListNaturalHeight({
+      itemCount: this._visibleCount,
+      rowHeight,
+      hasError: Boolean(this._error),
+      loading: this._loading,
+    });
+    const key = `${naturalHeight}:${this._visibleCount}:${this._loading}:${this._error}:${rowHeight}`;
+    if (key === this._lastMetricsKey) return;
+    this._lastMetricsKey = key;
+    this.dispatchEvent(
+      new CustomEvent<ListMetricsDetail>('list-metrics', {
+        detail: { naturalHeight, itemCount: this._visibleCount },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  async refresh(): Promise<void> {
+    this._loading = true;
+    this._error = '';
+    this._lastPlayedMediaId = getAppSettings().lastPlayedMediaId;
+
+    try {
+      const [items, playlists, favorites] = await Promise.all([
+        getMediaList(),
+        getPlaylistList(),
+        getPlaylist(FAVORITES_PLAYLIST_ID),
+      ]);
+      this._items = items;
+      if (this._lastPlayedMediaId && !items.some((item) => item.id === this._lastPlayedMediaId)) {
+        setAppSettings({ lastPlayedMediaId: '' });
+        this._lastPlayedMediaId = '';
+      }
+      this._playlists = playlists
+        .filter((playlist) => playlist.kind === 'user')
+        .map((playlist) => ({ id: playlist.id, name: playlist.name }));
+
+      const favoriteIds = new Set(
+        (favorites?.entries ?? []).filter((entry) => !entry.removed).map((entry) => entry.mediaId),
+      );
+      const favoriteStates = new Map<string, boolean>();
+      for (const item of items) {
+        favoriteStates.set(item.id, favoriteIds.has(item.id));
+      }
+      this._favoriteStates = favoriteStates;
+    } catch (error) {
+      void reportError(error, { where: 'media-list.refresh' });
+      this._error = msg('无法加载媒体库');
+      this._items = [];
+      this._playlists = [];
+      this._favoriteStates = new Map();
+    } finally {
+      this._loading = false;
+    }
+  }
+
+  private _getAddToPlaylistMenuItems(): DropdownMenuItem[] {
+    const items: DropdownMenuItem[] = [
+      { key: CREATE_PLAYLIST_MENU_KEY, label: msg('新建播放列表…') },
+      { key: '__divider__', type: 'divider', label: '' },
+      { key: FAVORITES_PLAYLIST_ID, label: msg('加入「喜欢」') },
+    ];
+    if (this._playlists.length > 0) {
+      items.push(
+        ...this._playlists.map((playlist) => ({
+          key: playlist.id,
+          label: msg(str`加入「${playlist.name}」`),
+        })),
+      );
+    }
+    return items;
+  }
+
+  private _playlistDisplayName(playlistId: string): string {
+    if (playlistId === FAVORITES_PLAYLIST_ID) {
+      return msg('喜欢');
+    }
+    return this._playlists.find((p) => p.id === playlistId)?.name ?? msg('播放列表');
+  }
+
+  render() {
+    let renderedItems = this._items;
+    const keyword = (this.keyword ?? '').trim().toLowerCase();
+    if (keyword) {
+      renderedItems = renderedItems.filter((item: MediaItem) =>
+        item.title.toLowerCase().includes(keyword),
+      );
+    }
+    if (this.sortBy && this.sortDirection) {
+      renderedItems = [...renderedItems].sort((a: MediaItem, b: MediaItem) => {
+        if (this.sortBy === 'date') {
+          return this.sortDirection === 'asc'
+            ? a.createdAt - b.createdAt
+            : b.createdAt - a.createdAt;
+        }
+        if (this.sortBy === 'title') {
+          return this.sortDirection === 'asc'
+            ? a.title.localeCompare(b.title)
+            : b.title.localeCompare(a.title);
+        }
+        return 0;
+      });
+    }
+
+    if (this.limit != null && this.limit >= 0) {
+      renderedItems = renderedItems.slice(0, this.limit);
+    }
+
+    this._visibleCount = renderedItems.length;
+
+    const rowHeight = this._rowHeight();
+    const listHeight = this.fillHeight
+      ? '100%'
+      : Math.min(Math.max(renderedItems.length, 1) * rowHeight, MEDIA_LIST_HEIGHT);
+
+    const visibleIds = renderedItems.map((item) => item.id);
+
+    this._visibleIds = visibleIds;
+    const visibleSet = new Set(visibleIds);
+    this._visibleSelected = new Set([...this._selected].filter((id) => visibleSet.has(id)));
+    const allVisibleSelected =
+      visibleIds.length > 0 && this._visibleSelected.size === visibleIds.length;
+
+    return html`
+      <section>
+        ${this.selectionMode
+          ? html`<div class="selection-chrome">
+              <div class="header">
+                <p class="selection-count">${msg(str`已选 ${this._visibleSelected.size} 项`)}</p>
+                <ui-button variant="secondary" @click=${() => this.exitSelectionMode()}
+                  >${msg('取消')}</ui-button
+                >
+              </div>
+              <div class="batch-controls">
+                <ui-tooltip title="${allVisibleSelected ? msg('取消全选') : msg('全选')}">
+                  <ui-button
+                    variant="secondary"
+                    aria-label="${allVisibleSelected ? msg('取消全选') : msg('全选')}"
+                    @click=${() =>
+                      allVisibleSelected ? this._clearSelection() : this._selectAll(visibleIds)}
+                  >
+                    <ui-icon name="${allVisibleSelected ? 'unselect-all' : 'select-all'}"></ui-icon>
+                  </ui-button>
+                </ui-tooltip>
+                <ui-dropdown
+                  trigger="click"
+                  placement="bottomLeft"
+                  ?disabled=${this._visibleSelected.size === 0 || this._batchAddingToPlaylist}
+                  .menu=${{ items: this._getAddToPlaylistMenuItems() }}
+                  @menu-click=${(e: CustomEvent<DropdownMenuClickDetail>) =>
+                    void this._handleBatchAddToPlaylist(e)}
+                >
+                  <ui-tooltip title="${msg('加入播放列表')}">
+                    <ui-button
+                      variant="secondary"
+                      aria-label="${msg('加入播放列表')}"
+                      ?disabled=${this._visibleSelected.size === 0 || this._batchAddingToPlaylist}
+                    >
+                      <ui-icon name="add-to-playlist"></ui-icon>
+                    </ui-button>
+                  </ui-tooltip>
+                </ui-dropdown>
+                <ui-popconfirm
+                  title=${msg(str`确定删除选中的 ${this._visibleSelected.size} 项吗？`)}
+                  placement="bottom"
+                  ?confirm-loading=${this._batchDeleting}
+                  @confirm=${() => this._handleBatchDelete()}
+                >
+                  <ui-button
+                    variant="danger"
+                    aria-label="${msg('删除')}"
+                    ?disabled=${this._visibleSelected.size === 0 || this._batchDeleting}
+                  >
+                    <ui-icon name="delete"></ui-icon>
+                  </ui-button>
+                </ui-popconfirm>
+              </div>
+            </div>`
+          : html`<div class="header">
+              <h2>${msg('媒体库')}</h2>
+              <div class="batch-controls">
+                <span class="count"
+                  >${this.limit && this.limit > 0 ? msg('最近') : ''} ${renderedItems.length}
+                  ${msg('项')}</span
+                >
+                ${renderedItems.length > 0 && !this.hideManage
+                  ? html`<ui-button
+                      variant="secondary"
+                      @click=${() => {
+                        this.selectionMode = true;
+                      }}
+                      >${msg('管理')}</ui-button
+                    >`
+                  : null}
+              </div>
+            </div>`}
+        ${this._error ? html`<ui-alert class="error" type="error">${this._error}</ui-alert>` : null}
+        ${this._loading
+          ? html`<div class="empty">${msg('加载中…')}</div>`
+          : renderedItems.length === 0
+            ? html`<div class="empty">
+                ${keyword ? msg('无匹配内容') : msg('暂无内容，请先导入音视频')}
+              </div>`
+            : html`
+                <div class="list-viewport">
+                  <ui-virtual-grid
+                    .items=${renderedItems}
+                    .itemHeight=${rowHeight}
+                    .containerHeight=${listHeight}
+                    .gridItems=${1}
+                    .renderItem=${this._renderItem}
+                  ></ui-virtual-grid>
+                </div>
+              `}
+        <input type="file" accept=".srt,.lrc" @change="${this._handleSubtitleFile}" />
+
+        <ui-modal
+          title=${msg('新建播放列表')}
+          ?open=${this._createPlaylistModalOpen}
+          centered
+          width="400px"
+          ok-text=${msg('创建并加入')}
+          ?confirm-loading=${this._createPlaylistBusy}
+          @beforeOk=${(event: CustomEvent) => void this._onCreatePlaylistBeforeOk(event)}
+          @cancel=${() => this._closeCreatePlaylistModal()}
+          @update:open=${this._handleCreatePlaylistModalOpenChange}
+        >
+          <ui-input
+            .value=${this._createPlaylistName}
+            placeholder="${msg('播放列表名称')}"
+            aria-label="${msg('播放列表名称')}"
+            @change=${(event: CustomEvent<InputChangeDetail>) => {
+              this._createPlaylistName = event.detail.value || '';
+            }}
+            @keydown=${(event: KeyboardEvent) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                void this._submitCreatePlaylistAndAdd();
+              }
+            }}
+          ></ui-input>
+        </ui-modal>
+        <ui-modal
+          title=${msg('字幕文件名不一致')}
+          ?open=${this._mismatchConfirmOpen}
+          centered
+          width="420px"
+          ok-text=${msg('仍要导入')}
+          cancel-text=${msg('取消')}
+          ?confirm-loading=${this._importingSubtitleId !== ''}
+          @ok=${() => void this._confirmMismatchImport()}
+          @cancel=${this._cancelMismatchImport}
+        >
+          <p style="margin:0;line-height:1.6">
+            ${msg('所选字幕文件名与媒体不一致，仍要导入到当前媒体吗？')}
+          </p>
+          ${this._pendingMismatchImport
+            ? html`<p
+                style="margin:var(--space-sm) 0 0;color:var(--color-text-secondary,rgba(0,0,0,0.65));font-size:0.875rem;line-height:1.5"
+              >
+                ${this._pendingMismatchImport.file.name}
+              </p>`
+            : nothing}
+        </ui-modal>
+      </section>
+    `;
+  }
+
+  private _renderItem = (item: unknown): unknown => {
+    const media = item as MediaItem;
+    const isFavorite = this._favoriteStates.get(media.id) || false;
+    const isLastPlayed = Boolean(this._lastPlayedMediaId) && media.id === this._lastPlayedMediaId;
+    const practiceLabel = isLastPlayed ? msg('继续练习') : msg('练习');
+
+    return keyed(
+      media.id,
+      html`
+        <div
+          class="item"
+          @click=${this.selectionMode ? () => this._toggleSelection(media.id) : null}
+        >
+          ${this.selectionMode
+            ? html`<input
+                type="checkbox"
+                class="batch-checkbox"
+                .checked=${this._visibleSelected.has(media.id)}
+                @change=${() => this._toggleSelection(media.id)}
+                @click=${(e: Event) => e.stopPropagation()}
+              />`
+            : null}
+          <div class="meta">
+            <p class="title">${media.title}</p>
+            <p class="details">
+              <span class="badge">
+                <ui-tooltip title="${media.type === 'video' ? msg('视频') : msg('音频')}">
+                  <ui-icon
+                    name="${media.type === 'video' ? 'video' : 'music'}"
+                    size="var(--icon-md)"
+                  ></ui-icon>
+                </ui-tooltip>
+              </span>
+              <span>${formatTime(media.duration)}</span>
+              <span class="date">${formatDate(media.createdAt, true)}</span>
+              ${media.hasSubtitles
+                ? html`
+                    <span class="badge">
+                      <ui-tooltip title="${msg('含字幕')}">
+                        <ui-icon name="subtitle-on" size="var(--icon-md)"></ui-icon>
+                      </ui-tooltip>
+                    </span>
+                  `
+                : nothing}
+            </p>
+          </div>
+          <div class="actions" @click=${(e: Event) => e.stopPropagation()}>
+            <ui-tooltip title="${isFavorite ? msg('取消喜欢') : msg('喜欢')}">
+              <ui-button
+                variant="ghost"
+                aria-label="${isFavorite ? msg('取消喜欢') : msg('喜欢')}"
+                class="favorite-btn ${isFavorite ? 'active' : ''}"
+                @click="${() => this._handleToggleFavorite(media)}"
+              >
+                <ui-icon name="${isFavorite ? 'like-fill' : 'like'}" style="color: red"></ui-icon>
+              </ui-button>
+            </ui-tooltip>
+
+            <ui-tooltip title="${media.hasSubtitles ? msg('更新字幕') : msg('导入字幕')}">
+              <ui-button
+                variant="secondary"
+                aria-label="${media.hasSubtitles ? msg('更新字幕') : msg('导入字幕')}"
+                ?disabled="${this._importingSubtitleId === media.id}"
+                @click="${() => this._openSubtitlePicker(media, media.hasSubtitles)}"
+              >
+                <ui-icon name="subtitle"></ui-icon>
+              </ui-button>
+            </ui-tooltip>
+            <ui-tooltip title="${practiceLabel}">
+              <ui-button
+                variant=${isLastPlayed ? 'primary' : 'secondary'}
+                aria-label="${practiceLabel}"
+                @click="${() => this._handlePractice(media)}"
+              >
+                <ui-icon name="practice"></ui-icon>
+              </ui-button>
+            </ui-tooltip>
+            <ui-popconfirm
+              title=${msg('确定删除该资源吗？')}
+              placement="bottom"
+              ?confirm-loading=${this._deletingId === media.id}
+              @confirm=${() => this._handleDelete(media)}
+            >
+              <ui-button
+                variant="danger"
+                aria-label="${msg('删除')}"
+                ?disabled="${this._deletingId === media.id}"
+              >
+                <ui-icon name="delete"></ui-icon>
+              </ui-button>
+            </ui-popconfirm>
+            <ui-dropdown
+              trigger="click"
+              placement="bottomRight"
+              .menu=${{ items: this._getAddToPlaylistMenuItems() }}
+              @menu-click=${(e: CustomEvent<DropdownMenuClickDetail>) =>
+                void this._handleAddToPlaylist(e, media)}
+            >
+              <ui-tooltip title="${msg('加入播放列表')}">
+                <ui-button variant="secondary" aria-label="${msg('加入播放列表')}">
+                  <ui-icon name="add-to-playlist"></ui-icon>
+                </ui-button>
+              </ui-tooltip>
+            </ui-dropdown>
+          </div>
+        </div>
+      `,
+    );
+  };
+
+  private async _handleToggleFavorite(media: MediaItem): Promise<void> {
+    try {
+      const isNowFavorite = await toggleFavorites(media.id);
+      this._favoriteStates.set(media.id, isNowFavorite);
+      this.requestUpdate();
+      Message.success(isNowFavorite ? msg('已添加到喜欢') : msg('已从喜欢移除'));
+      this.dispatchEvent(
+        new CustomEvent('playlist-changed', {
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    } catch (error) {
+      void reportError(error, { where: 'media-list.toggleFavorite', mediaId: media.id });
+      Message.error(msg('操作失败，请重试'));
+    }
+  }
+
+  private _openCreatePlaylistModal(mediaIds: string | string[]): void {
+    const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
+    this._createPlaylistMediaIds = ids.filter(Boolean);
+    this._createPlaylistName = '';
+    this._createPlaylistModalOpen = true;
+  }
+
+  private _closeCreatePlaylistModal(): void {
+    this._createPlaylistModalOpen = false;
+    this._createPlaylistName = '';
+    this._createPlaylistMediaIds = [];
+    this._createPlaylistBusy = false;
+  }
+
+  private _handleCreatePlaylistModalOpenChange(event: CustomEvent<{ open: boolean }>): void {
+    if (event.target !== event.currentTarget) {
+      return;
+    }
+    if (!event.detail.open) {
+      this._closeCreatePlaylistModal();
+    }
+  }
+
+  private async _onCreatePlaylistBeforeOk(event: CustomEvent): Promise<void> {
+    event.preventDefault();
+    await this._submitCreatePlaylistAndAdd();
+  }
+
+  private async _submitCreatePlaylistAndAdd(): Promise<void> {
+    if (this._createPlaylistBusy) {
+      return;
+    }
+
+    const name = this._createPlaylistName.trim();
+    if (!name) {
+      Message.warning(msg('请输入播放列表名称'));
+      return;
+    }
+
+    const mediaIds = this._createPlaylistMediaIds;
+    if (mediaIds.length === 0) {
+      return;
+    }
+
+    this._createPlaylistBusy = true;
+    try {
+      const playlist = await createPlaylist(name);
+      let failed = 0;
+      try {
+        await addMediaBatchToPlaylist(playlist.id, mediaIds);
+      } catch {
+        failed = mediaIds.length;
+      }
+      const playlists = await getPlaylistList();
+      this._playlists = playlists
+        .filter((item) => item.kind === 'user')
+        .map((item) => ({ id: item.id, name: item.name }));
+      this._closeCreatePlaylistModal();
+      if (failed > 0) {
+        Message.error(msg(str`已创建「${name}」，但部分媒体添加失败`));
+      } else if (mediaIds.length === 1) {
+        Message.success(msg(str`已创建「${name}」并添加`));
+      } else {
+        Message.success(msg(str`已创建「${name}」并添加 ${mediaIds.length} 项`));
+      }
+      this.dispatchEvent(
+        new CustomEvent('playlist-changed', {
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    } catch (error) {
+      if (isPlaylistNameConflictError(error)) {
+        Message.warning(msg('该播放列表名称已存在'));
+        return;
+      }
+      void reportError(error, {
+        where: 'media-list.createPlaylistAndAdd',
+        mediaIds,
+      });
+      Message.error(msg('创建失败，请重试'));
+    } finally {
+      this._createPlaylistBusy = false;
+    }
+  }
+
+  private async _handleAddToPlaylist(
+    e: CustomEvent<DropdownMenuClickDetail>,
+    media: MediaItem,
+  ): Promise<void> {
+    const playlistId = e.detail.key;
+    if (playlistId === CREATE_PLAYLIST_MENU_KEY) {
+      this._openCreatePlaylistModal(media.id);
+      return;
+    }
+    if (!playlistId) return;
+
+    try {
+      await addMediaToPlaylist(playlistId, media.id);
+      if (playlistId === FAVORITES_PLAYLIST_ID) {
+        this._favoriteStates.set(media.id, true);
+        this.requestUpdate();
+      }
+      const playlistName = this._playlistDisplayName(playlistId);
+      Message.success(msg(str`已添加到「${playlistName}」`));
+      this.dispatchEvent(
+        new CustomEvent('playlist-changed', {
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    } catch (error) {
+      void reportError(error, { where: 'media-list.addToPlaylist', mediaId: media.id });
+      Message.error(msg('添加失败，请重试'));
+    }
+  }
+
+  private async _handleBatchAddToPlaylist(e: CustomEvent<DropdownMenuClickDetail>): Promise<void> {
+    const playlistId = e.detail.key;
+    const mediaIds = [...this._visibleSelected];
+    if (mediaIds.length === 0) return;
+
+    if (playlistId === CREATE_PLAYLIST_MENU_KEY) {
+      this._openCreatePlaylistModal(mediaIds);
+      return;
+    }
+    if (!playlistId) return;
+
+    this._batchAddingToPlaylist = true;
+    try {
+      let failed = 0;
+      try {
+        await addMediaBatchToPlaylist(playlistId, mediaIds);
+      } catch {
+        failed = mediaIds.length;
+      }
+      if (playlistId === FAVORITES_PLAYLIST_ID && failed === 0) {
+        for (const mediaId of mediaIds) {
+          this._favoriteStates.set(mediaId, true);
+        }
+        this.requestUpdate();
+      }
+      const playlistName = this._playlistDisplayName(playlistId);
+      if (failed > 0) {
+        Message.error(msg(str`部分媒体未能加入「${playlistName}」`));
+      } else {
+        Message.success(msg(str`已将 ${mediaIds.length} 项添加到「${playlistName}」`));
+      }
+      this.dispatchEvent(
+        new CustomEvent('playlist-changed', {
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    } catch (error) {
+      void reportError(error, {
+        where: 'media-list.batchAddToPlaylist',
+        playlistId,
+        count: mediaIds.length,
+      });
+      Message.error(msg('添加失败，请重试'));
+    } finally {
+      this._batchAddingToPlaylist = false;
+    }
+  }
+
+  private _openSubtitlePicker(media: MediaItem, overwrite = false): void {
+    this._pendingSubtitleMediaId = media.id;
+    this._pendingSubtitleOverwrite = overwrite;
+    const input = this.renderRoot.querySelector('input[type="file"]') as HTMLInputElement | null;
+    input?.click();
+  }
+
+  private async _handleSubtitleFile(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    const mediaId = this._pendingSubtitleMediaId;
+    const overwrite = this._pendingSubtitleOverwrite;
+    input.value = '';
+    this._pendingSubtitleMediaId = '';
+    this._pendingSubtitleOverwrite = false;
+
+    if (!file || !mediaId) {
+      return;
+    }
+    const media = this._items.find((item) => item.id === mediaId);
+    if (!media) {
+      return;
+    }
+
+    const pending: PendingSubtitleImport = {
+      mediaId,
+      file,
+      overwrite,
+    };
+
+    if (!subtitleBasenameMatchesMedia(file, media.filename)) {
+      this._pendingMismatchImport = pending;
+      this._mismatchConfirmOpen = true;
+      return;
+    }
+
+    await this._runSubtitleImport(pending);
+  }
+
+  private _clearMismatchConfirm(): void {
+    this._mismatchConfirmOpen = false;
+    this._pendingMismatchImport = null;
+  }
+
+  private _cancelMismatchImport(): void {
+    this._clearMismatchConfirm();
+  }
+
+  private async _confirmMismatchImport(): Promise<void> {
+    const pending = this._pendingMismatchImport;
+    if (!pending) {
+      this._clearMismatchConfirm();
+      return;
+    }
+    this._clearMismatchConfirm();
+    await this._runSubtitleImport(pending);
+  }
+
+  private async _runSubtitleImport(pending: PendingSubtitleImport): Promise<void> {
+    this._importingSubtitleId = pending.mediaId;
+    try {
+      const result = await runSubtitleImport(pending.mediaId, pending.file, {
+        overwrite: pending.overwrite,
+      });
+      reportSubtitleImportResult(result);
+
+      const track = findImportedSubtitleTrack(result, pending.mediaId);
+      if (track) {
+        Message.success({ message: msg('字幕已导入') });
+        this._items = this._items.map((item) =>
+          item.id === pending.mediaId ? { ...item, hasSubtitles: true } : item,
+        );
+        this.dispatchEvent(
+          new CustomEvent('subtitle-imported', {
+            detail: { mediaId: pending.mediaId, track },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      }
+    } catch (error) {
+      void reportError(error, { where: 'media-list.importSubtitle', mediaId: pending.mediaId });
+      Message.error({ message: msg('导入字幕失败，请重试') });
+    } finally {
+      this._importingSubtitleId = '';
+    }
+  }
+
+  private _handlePractice(item: MediaItem): void {
+    this.dispatchEvent(
+      new CustomEvent('media-selected', {
+        detail: { id: item.id },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  private _toggleSelection(id: string): void {
+    const next = new Set(this._selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    this._selected = next;
+  }
+
+  private _selectAll(visibleIds: string[]): void {
+    this._selected = new Set(visibleIds);
+  }
+
+  private _clearSelection(): void {
+    this._selected = new Set();
+  }
+
+  exitSelectionMode(): void {
+    this.selectionMode = false;
+    this._selected = new Set();
+  }
+
+  private async _handleBatchDelete(): Promise<void> {
+    const visibleSet = new Set(this._visibleIds);
+    const toDelete = [...this._selected].filter((id) => visibleSet.has(id));
+    if (toDelete.length === 0) return;
+    this._batchDeleting = true;
+    try {
+      try {
+        await deleteMediaBatch(toDelete);
+        Message.success(msg('批量删除完成'));
+        const deleted = new Set(toDelete);
+        this._selected = new Set([...this._selected].filter((id) => !deleted.has(id)));
+        await this.refresh();
+      } catch (error) {
+        void reportError(error, { where: 'media-list.batchDelete', count: toDelete.length });
+        Message.error(msg('部分媒体删除失败'));
+      }
+    } finally {
+      this._batchDeleting = false;
+    }
+  }
+
+  private async _handleDelete(item: MediaItem): Promise<void> {
+    this._deletingId = item.id;
+
+    try {
+      await Promise.all([deleteMedia(item.id), deleteSubtitle(item.id)]);
+      this._items = this._items.filter((entry) => entry.id !== item.id);
+      if (this._lastPlayedMediaId === item.id) {
+        setAppSettings({ lastPlayedMediaId: '' });
+        this._lastPlayedMediaId = '';
+      }
+      this.dispatchEvent(
+        new CustomEvent('media-deleted', {
+          detail: { id: item.id },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    } catch (error) {
+      void reportError(error, { where: 'media-list.delete', mediaId: item.id });
+      this._error = msg('删除失败，请重试');
+    } finally {
+      this._deletingId = '';
+    }
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'media-list': MediaList;
+  }
+}

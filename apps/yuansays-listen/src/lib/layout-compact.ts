@@ -1,0 +1,65 @@
+/** Min px for a fill-height list before falling back to page scroll. */
+export const MIN_FILL_LIST_PX = 200;
+
+/** Hysteresis: estimated leftover needed to leave compact / fill-height mode. */
+export const EXIT_FILL_LIST_PX = 280;
+
+/** Short viewport fallback (matches prior compact MQ). */
+export const COMPACT_VIEWPORT_MQ = '(max-height: 739px)';
+
+/** Narrow screen: list rows stack actions under text. */
+export const NARROW_VIEWPORT_MQ = '(max-width: 767px)';
+
+/**
+ * Vertical space inside `.main-content` for a routed page host (below the app header).
+ * Returns 0 when the page is not mounted under the app shell.
+ */
+export function measurePageViewportHeight(pageHost: HTMLElement): number {
+  const main = pageHost.parentElement;
+  const mainContent = main?.parentElement;
+  if (!mainContent) return 0;
+
+  const header = mainContent.querySelector(':scope > header');
+  const cs = getComputedStyle(mainContent);
+  const pad = (Number.parseFloat(cs.paddingTop) || 0) + (Number.parseFloat(cs.paddingBottom) || 0);
+  const headerH = header instanceof HTMLElement ? header.offsetHeight : 0;
+  const headerMb =
+    header instanceof HTMLElement
+      ? Number.parseFloat(getComputedStyle(header).marginBottom) || 0
+      : 0;
+
+  return Math.max(0, mainContent.clientHeight - pad - headerH - headerMb);
+}
+
+export function sumOffsetHeights(elements: Iterable<Element>): number {
+  let total = 0;
+  for (const el of elements) {
+    if (el instanceof HTMLElement) total += el.offsetHeight;
+  }
+  return total;
+}
+
+/** True when the element generates a box that participates in parent gap. */
+export function isLayoutBox(el: Element): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  if (el.hidden) return false;
+  const display = getComputedStyle(el).display;
+  return display !== 'none' && display !== 'contents';
+}
+
+/** Child count used for flex/grid gap, skipping hidden and non-boxes. */
+export function layoutBoxCount(parent: Element | null | undefined): number {
+  if (!parent) return 0;
+  let count = 0;
+  for (const child of parent.children) {
+    if (isLayoutBox(child)) count += 1;
+  }
+  return count;
+}
+
+export function gapPx(el: Element | null | undefined, fallback = 16): number {
+  if (!el) return fallback;
+  const raw = getComputedStyle(el).gap || getComputedStyle(el).rowGap;
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}

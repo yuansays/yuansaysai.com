@@ -1,0 +1,195 @@
+import { msg } from '@lit/localize';
+import type { MediaItem, MediaType } from '../types/models.js';
+
+const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'webm', 'm4a', 'aac', 'flac']);
+
+const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'mkv', 'ogv']);
+
+const MEDIA_EXTENSIONS = new Set([...AUDIO_EXTENSIONS, ...VIDEO_EXTENSIONS]);
+
+const AUDIO_MIME_BY_EXTENSION: Record<string, string> = {
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  webm: 'audio/webm',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac',
+  flac: 'audio/flac',
+};
+
+const VIDEO_MIME_BY_EXTENSION: Record<string, string> = {
+  mp4: 'video/mp4',
+  mov: 'video/quicktime',
+  mkv: 'video/x-matroska',
+  ogv: 'video/ogg',
+};
+
+const MIME_BY_EXTENSION: Record<string, string> = {
+  ...AUDIO_MIME_BY_EXTENSION,
+  ...VIDEO_MIME_BY_EXTENSION,
+};
+
+export function getFileExtension(fileName: string): string {
+  const dotIndex = fileName.lastIndexOf('.');
+  if (dotIndex <= 0) {
+    return '';
+  }
+  return fileName.slice(dotIndex + 1).toLowerCase();
+}
+
+export function getBaseName(fileName: string): string {
+  const dotIndex = fileName.lastIndexOf('.');
+  if (dotIndex <= 0) {
+    return fileName;
+  }
+  return fileName.slice(0, dotIndex);
+}
+
+export function resolveMimeType(file: File): string {
+  if (file.type) {
+    return file.type;
+  }
+
+  const extension = getFileExtension(file.name);
+  return MIME_BY_EXTENSION[extension] ?? '';
+}
+
+export function isMediaFile(file: File): boolean {
+  const mimeType = resolveMimeType(file);
+  if (mimeType.startsWith('audio/') || mimeType.startsWith('video/')) {
+    return true;
+  }
+
+  return MEDIA_EXTENSIONS.has(getFileExtension(file.name));
+}
+
+export function isAudioFile(file: File): boolean {
+  return (
+    resolveMimeType(file).startsWith('audio/') || AUDIO_EXTENSIONS.has(getFileExtension(file.name))
+  );
+}
+
+export function isVideoFile(file: File): boolean {
+  return (
+    resolveMimeType(file).startsWith('video/') || VIDEO_EXTENSIONS.has(getFileExtension(file.name))
+  );
+}
+
+export function isSrtFile(file: File): boolean {
+  return getFileExtension(file.name) === 'srt';
+}
+
+export function isLrcFile(file: File): boolean {
+  return getFileExtension(file.name) === 'lrc';
+}
+
+export function getMediaType(mimeType: string): MediaType {
+  return mimeType.startsWith('video/') ? 'video' : 'audio';
+}
+
+export function titleFromFileName(fileName: string): string {
+  return getBaseName(fileName).trim() || fileName;
+}
+
+export async function hashString(str: string) {
+  const dataBuffer = new TextEncoder().encode(str);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);
+  return bufferToHex(hashBuffer);
+}
+
+export async function hashFile(file: File) {
+  const arrayBuffer = await file.arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+  return bufferToHex(hashBuffer);
+}
+
+export function bufferToHex(buffer: ArrayBuffer) {
+  const byteArray = new Uint8Array(buffer);
+  return Array.from(byteArray, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export async function hashAny(target: string | File) {
+  if (typeof target === 'string') {
+    return hashString(target);
+  }
+  return hashFile(target);
+}
+
+const DURATION_EPSILON_SECONDS = 0.05;
+
+export function durationsMatch(a: number, b: number): boolean {
+  return Math.abs(a - b) < DURATION_EPSILON_SECONDS;
+}
+
+/** size 是否一致（导入判重的第一道廉价筛） */
+export function mediaSizesMatch(
+  existing: Pick<MediaItem, 'size'>,
+  candidate: Pick<MediaItem, 'size'>,
+): boolean {
+  return existing.size === candidate.size;
+}
+
+/**
+ * 已存媒体与待导入文件是否为同一内容。
+ * 调用方应先按 size → duration 短路，仅在可能相同时再算 contentHash 后调用本函数。
+ */
+export function isSameMediaContent(
+  existing: Pick<MediaItem, 'id' | 'size' | 'duration' | 'contentHash'>,
+  candidate: Pick<MediaItem, 'id' | 'size' | 'duration' | 'contentHash'>,
+): boolean {
+  return (
+    existing.id === candidate.id &&
+    mediaSizesMatch(existing, candidate) &&
+    durationsMatch(existing.duration, candidate.duration) &&
+    !!existing.contentHash &&
+    existing.contentHash === candidate.contentHash
+  );
+}
+
+export async function isSameFile(file1: File, file2: File): Promise<boolean> {
+  if (file1.name !== file2.name || file1.size !== file2.size || file1.type !== file2.type) {
+    return false;
+  }
+  return (await hashFile(file1)) === (await hashFile(file2));
+}
+
+export function titleTypeKey(title: string, type: MediaType): string {
+  return `${title}::${type}`;
+}
+
+export function getMediaDuration(file: Blob, mimeType: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const isVideo = getMediaType(mimeType) === 'video';
+    const element = document.createElement(isVideo ? 'video' : 'audio');
+
+    const cleanup = (): void => {
+      URL.revokeObjectURL(url);
+      element.removeAttribute('src');
+      element.load();
+    };
+
+    element.preload = 'metadata';
+    element.onloadedmetadata = () => {
+      const duration = element.duration;
+      cleanup();
+      if (!Number.isFinite(duration) || duration <= 0) {
+        reject(new Error(msg('无法读取媒体时长')));
+        return;
+      }
+      resolve(duration);
+    };
+    element.onerror = () => {
+      cleanup();
+      reject(new Error(msg('无法加载媒体文件')));
+    };
+    element.src = url;
+  });
+}
+
+export function validateMediaFile(file: File): { valid: boolean; error?: string } {
+  if (!isMediaFile(file)) {
+    return { valid: false, error: msg('不支持的媒体格式') };
+  }
+  return { valid: true };
+}
