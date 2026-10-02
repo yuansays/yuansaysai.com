@@ -1,0 +1,7 @@
+{
+  "source": "WordTap ECDICT",
+  "sourceEntryCount": 765023,
+  "importedSingleWords": 398979,
+  "bucketCount": 700,
+  "format": "lowercase word -> [phonetic, Chinese translation, English definition]"
+}

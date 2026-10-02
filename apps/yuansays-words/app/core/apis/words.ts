@@ -1,8 +1,11 @@
 import type { Word } from '../types'
 import { ENV } from '../config/env'
 import type { AxiosResponse } from '../utils/http'
+import { wordTapBucket, wordTapEntryToWord, type WordTapCompactEntry } from '../utils/openWordSources.ts'
 
 let bundledWords: Promise<Map<string, Word>> | undefined
+const wordTapShards = new Map<string, Promise<Record<string, WordTapCompactEntry>>>()
+const MAX_CACHED_SHARDS = 24
 
 async function getBundledWords() {
   if (!bundledWords) {
@@ -21,6 +24,28 @@ async function getBundledWords() {
   return bundledWords
 }
 
+async function getWordTapWord(query: string): Promise<Word | null> {
+  if (!/^[a-z]+(?:['-][a-z]+)*$/.test(query)) return null
+  const bucket = wordTapBucket(query)
+  let pending = wordTapShards.get(bucket)
+  if (!pending) {
+    pending = fetch(`${ENV.RESOURCE_URL}/dicts/en/wordtap-ecdict/${bucket}.json`)
+      .then(async response => {
+        if (response.status === 404) return {}
+        if (!response.ok) throw new Error('开源词典加载失败，请联网后重试。')
+        return response.json() as Promise<Record<string, WordTapCompactEntry>>
+      })
+      .catch(error => {
+        wordTapShards.delete(bucket)
+        throw error
+      })
+    wordTapShards.set(bucket, pending)
+    if (wordTapShards.size > MAX_CACHED_SHARDS) wordTapShards.delete(wordTapShards.keys().next().value!)
+  }
+  const entry = (await pending)[query]
+  return entry ? wordTapEntryToWord(query, entry) : null
+}
+
 /** Local dictionaries take precedence; no account, remote API, or localhost server is required. */
 export async function queryWord(params?: { word: string }): Promise<AxiosResponse<Word | null>> {
   const query = params?.word?.trim().toLowerCase() ?? ''
@@ -28,10 +53,12 @@ export async function queryWord(params?: { word: string }): Promise<AxiosRespons
   try {
     const { useBaseStore } = await import('../stores/base')
     const store = useBaseStore()
-    const localWord = store.word.bookList
-      .flatMap(dict => dict.words)
-      .find(word => word.word.trim().toLowerCase() === query)
-    const data = localWord ?? (await getBundledWords()).get(query) ?? null
+    let localWord: Word | undefined
+    for (const dict of store.word.bookList ?? []) {
+      localWord = dict.words?.find(word => word.word.trim().toLowerCase() === query)
+      if (localWord) break
+    }
+    const data = localWord ?? (await getBundledWords()).get(query) ?? (await getWordTapWord(query))
     return {
       code: data ? 200 : 404,
       success: !!data,

@@ -30,7 +30,7 @@ export async function resolveWordLookup(rawWord: string): Promise<WordLookupReso
 export function splitEnglishText(text: string): { text: string; isWord: boolean }[] {
   if (!text) return []
   const tokens: { text: string; isWord: boolean }[] = []
-  const regex = /[a-zA-Z]+(?:'[a-zA-Z]+)?|[^a-zA-Z]+/g
+  const regex = /[a-zA-Z]+(?:['-][a-zA-Z]+)*|[^a-zA-Z]+/g
   let match: RegExpExecArray | null
   while ((match = regex.exec(text)) !== null) {
     const token = match[0]

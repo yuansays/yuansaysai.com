@@ -569,7 +569,10 @@ onUnmounted(() => {
   <BasePage>
     <div class="mb-4 flex flex-wrap gap-2 items-center justify-between">
       <h1 class="text-xl font-bold m-0">yuansays words</h1>
-      <span class="text-sm color-gray">每天练一点，让单词留下来。</span>
+      <div class="flex items-center gap-4">
+        <span class="text-sm color-gray">每天练一点，让单词留下来。</span>
+        <NuxtLink to="/read" class="color-link text-sm">阅读采词 →</NuxtLink>
+      </div>
     </div>
     <p class="md:hidden text-sm color-gray mb-4">完整拼写练习推荐连接实体键盘。</p>
 

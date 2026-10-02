@@ -19,6 +19,161 @@
     "cover": null,
     "hidden": false,
     "category": "中国考试",
-    "tags": ["大学英语"]
+    "tags": [
+      "大学英语"
+    ]
+  },
+  {
+    "id": "recite-zk",
+    "enName": "recite-zk",
+    "name": "中考 · recite",
+    "description": "recite 提供的 ECDICT 高频排序词表（1603 词）",
+    "category": "中学英语",
+    "tags": [
+      "recite",
+      "中考"
+    ],
+    "url": "RECITE_ZK.json",
+    "length": 1603,
+    "language": "en",
+    "translateLanguage": "zh-CN",
+    "version": 1,
+    "type": "word"
+  },
+  {
+    "id": "recite-gk",
+    "enName": "recite-gk",
+    "name": "高考 · recite",
+    "description": "recite 提供的 ECDICT 高频排序词表（3677 词）",
+    "category": "中学英语",
+    "tags": [
+      "recite",
+      "高考"
+    ],
+    "url": "RECITE_GK.json",
+    "length": 3677,
+    "language": "en",
+    "translateLanguage": "zh-CN",
+    "version": 1,
+    "type": "word"
+  },
+  {
+    "id": "recite-cet4",
+    "enName": "recite-cet4",
+    "name": "四级 · recite",
+    "description": "recite 提供的 ECDICT 高频排序词表（3849 词）",
+    "category": "中国考试",
+    "tags": [
+      "recite",
+      "四级"
+    ],
+    "url": "RECITE_CET4.json",
+    "length": 3849,
+    "language": "en",
+    "translateLanguage": "zh-CN",
+    "version": 1,
+    "type": "word"
+  },
+  {
+    "id": "recite-cet6",
+    "enName": "recite-cet6",
+    "name": "六级 · recite",
+    "description": "recite 提供的 ECDICT 高频排序词表（5407 词）",
+    "category": "中国考试",
+    "tags": [
+      "recite",
+      "六级"
+    ],
+    "url": "RECITE_CET6.json",
+    "length": 5407,
+    "language": "en",
+    "translateLanguage": "zh-CN",
+    "version": 1,
+    "type": "word"
+  },
+  {
+    "id": "recite-ky",
+    "enName": "recite-ky",
+    "name": "考研 · recite",
+    "description": "recite 提供的 ECDICT 高频排序词表（4801 词）",
+    "category": "中国考试",
+    "tags": [
+      "recite",
+      "考研"
+    ],
+    "url": "RECITE_KY.json",
+    "length": 4801,
+    "language": "en",
+    "translateLanguage": "zh-CN",
+    "version": 1,
+    "type": "word"
+  },
+  {
+    "id": "recite-toefl",
+    "enName": "recite-toefl",
+    "name": "托福 · recite",
+    "description": "recite 提供的 ECDICT 高频排序词表（6974 词）",
+    "category": "留学考试",
+    "tags": [
+      "recite",
+      "托福"
+    ],
+    "url": "RECITE_TOEFL.json",
+    "length": 6974,
+    "language": "en",
+    "translateLanguage": "zh-CN",
+    "version": 1,
+    "type": "word"
+  },
+  {
+    "id": "recite-ielts",
+    "enName": "recite-ielts",
+    "name": "雅思 · recite",
+    "description": "recite 提供的 ECDICT 高频排序词表（5040 词）",
+    "category": "留学考试",
+    "tags": [
+      "recite",
+      "雅思"
+    ],
+    "url": "RECITE_IELTS.json",
+    "length": 5040,
+    "language": "en",
+    "translateLanguage": "zh-CN",
+    "version": 1,
+    "type": "word"
+  },
+  {
+    "id": "recite-gre",
+    "enName": "recite-gre",
+    "name": "GRE · recite",
+    "description": "recite 提供的 ECDICT 高频排序词表（7504 词）",
+    "category": "留学考试",
+    "tags": [
+      "recite",
+      "GRE"
+    ],
+    "url": "RECITE_GRE.json",
+    "length": 7504,
+    "language": "en",
+    "translateLanguage": "zh-CN",
+    "version": 1,
+    "type": "word"
+  },
+  {
+    "id": "recite-awl",
+    "enName": "recite-awl",
+    "name": "学术英语 AWL · recite",
+    "description": "recite 提供的 ECDICT 高频排序词表（570 词）",
+    "category": "学术英语",
+    "tags": [
+      "recite",
+      "学术英语 AWL"
+    ],
+    "url": "RECITE_AWL.json",
+    "length": 570,
+    "language": "en",
+    "translateLanguage": "zh-CN",
+    "version": 1,
+    "type": "word"
   }
 ]

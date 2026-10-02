@@ -9,12 +9,15 @@ import { defineNuxtConfig } from 'nuxt/config'
 
 let latestCommitHash = ''
 let latestCommitTime = ''
+let sourceCommit = ''
 try {
   latestCommitHash = execSync('git rev-parse --short HEAD').toString().trim()
   latestCommitTime = execSync('git log -1 --format=%ci').toString().trim()
+  sourceCommit = execSync('git rev-parse HEAD').toString().trim()
 } catch (e) {
   latestCommitHash = 'unknown'
   latestCommitTime = 'unknown'
+  sourceCommit = 'main'
 }
 
 const siteOrigin = (process.env.ORIGIN || 'https://yuansaysai.com').replace(/\/$/, '')
@@ -66,7 +69,7 @@ export default defineNuxtConfig({
   hooks: {
     'pages:extend'(pages) {
       // Ship only the local word-learning app; the personal site owns the domain root.
-      const allowed = new Set(['/words', '/dict', '/dict-list', '/setting', '/help', '/about'])
+      const allowed = new Set(['/words', '/dict', '/dict-list', '/read', '/setting', '/help', '/about'])
       for (let i = pages.length - 1; i >= 0; i--) {
         const page = pages[i]
         if (!allowed.has(page.path) && !/^\/(practice-words|words-test)\//.test(page.path)) {
@@ -143,7 +146,7 @@ export default defineNuxtConfig({
       passwordRsaPublicKey: process.env.VITE_PASSWORD_RSA_PUBLIC_KEY || '',
       latestCommitHash: latestCommitHash + (process.env.NODE_ENV === 'production' ? '' : ' (dev)'),
       latestCommitTime: latestCommitTime,
-      sourceCommit: process.env.SOURCE_COMMIT || execSync('git rev-parse HEAD').toString().trim(),
+      sourceCommit: process.env.SOURCE_COMMIT || sourceCommit,
     },
   },
   // 构建配置

@@ -13,6 +13,8 @@ export type Word = {
   word: string
   phonetic0: string
   phonetic1: string
+  /** English definition supplied by the ECDICT-derived open word sources. */
+  definition?: string
   trans: {
     pos: string
     cn: string

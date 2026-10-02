@@ -364,7 +364,8 @@ export async function sleep(time: number) {
 }
 
 export async function _getDictDataByUrl(val: DictResource, type: DictType = DictType.word): Promise<Dict> {
-  if (LOCAL_ONLY && (type !== DictType.word || val.language !== 'en' || val.url !== 'CET4_T.json')) {
+  const isBundledWordList = val.url === 'CET4_T.json' || /^RECITE_(?:ZK|GK|CET4|CET6|KY|TOEFL|IELTS|GRE|AWL)\.json$/.test(val.url)
+  if (LOCAL_ONLY && (type !== DictType.word || val.language !== 'en' || !isBundledWordList)) {
     throw new Error('此词库未随本站提供，请导入包含词条的个人词库。')
   }
   // await sleep(2000);
@@ -381,6 +382,10 @@ export async function _getDictDataByUrl(val: DictResource, type: DictType = Dict
     if (type === DictType.article) {
       return getDefaultDict({ ...val, articles: s })
     } else {
+      if (val.url.startsWith('RECITE_')) {
+        const { ecdictEntryToWord } = await import('./openWordSources.ts')
+        s = s.map((entry, index) => ecdictEntryToWord(entry, `${val.id}-${index}`))
+      }
       return getDefaultDict({ ...val, words: s })
     }
   }

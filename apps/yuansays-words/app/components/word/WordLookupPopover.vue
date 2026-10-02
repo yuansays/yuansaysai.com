@@ -127,6 +127,9 @@ watch(
             :show-full="true"
             :pos-space="false"
           />
+          <p v-if="wordLookupState.data.definition" class="english-definition mt-2">
+            {{ wordLookupState.data.definition }}
+          </p>
         </template>
       </div>
     </Transition>
@@ -153,6 +156,15 @@ watch(
   top: 1.1rem;
   right: 1rem;
   z-index: 1;
+}
+
+.english-definition {
+  max-height: 6rem;
+  overflow-y: auto;
+  white-space: pre-line;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--color-gray-text, #777);
 }
 
 .fade-enter-active,

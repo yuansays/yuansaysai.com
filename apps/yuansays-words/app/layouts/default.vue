@@ -43,7 +43,7 @@ const { locales, setLocale } = useI18n()
 const route = useRoute()
 
 const showIcon = $computed(() => {
-  return ['/', '/setting', '/help', '/about', '/dict-list'].includes(route.path)
+  return ['/', '/setting', '/help', '/about', '/dict-list', '/read'].includes(route.path)
 })
 
 onMounted(() => {
@@ -86,6 +86,10 @@ function onMouseLeave() {
           <IconFluentBookLetter20Regular />
           <span>{{ $t('select_dict') }}</span>
         </NuxtLink>
+        <NuxtLink to="/read" class="row">
+          <IconFluentReadingModeMobile20Regular />
+          <span>阅读采词</span>
+        </NuxtLink>
         <NuxtLink to="/help" class="row">
           <IconFluentQuestionCircle20Regular />
           <span>{{ $t('help') }}</span>
@@ -121,6 +125,10 @@ function onMouseLeave() {
         <div class="nav-item" @click="router.push('/dict-list')" :class="{ active: route.path === '/dict-list' }">
           <IconFluentBookLetter20Regular />
           <span>{{ $t('select_dict') }}</span>
+        </div>
+        <div class="nav-item" @click="router.push('/read')" :class="{ active: route.path === '/read' }">
+          <IconFluentReadingModeMobile20Regular />
+          <span>阅读采词</span>
         </div>
         <div class="nav-item" @click="router.push('/setting')" :class="{ active: route.path === '/setting' }">
           <IconFluentSettings20Regular />

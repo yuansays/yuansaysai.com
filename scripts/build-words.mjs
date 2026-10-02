@@ -102,6 +102,23 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // The large open dictionaries are loaded lazily. Refresh a requested shard
+  // online, while retaining the last successful response for offline reading.
+  if (/^\\/words\\/dicts\\/en\\/(?:wordtap-ecdict\\/[^/]+|word\\/RECITE_[^/]+)\\.json$/.test(url.pathname)) {
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE);
+      try {
+        const response = await fetch(request);
+        if (response.ok) {
+          await cache.put(request, response.clone());
+          return response;
+        }
+      } catch { /* Use a previously requested shard when offline. */ }
+      return await cache.match(request) || new Response('Dictionary unavailable offline.', { status: 503 });
+    })());
+    return;
+  }
+
   if (/^\\/words\\/(?:_nuxt|dicts|list|imgs|sound|libs)\\//.test(url.pathname)
       || /^\\/words\\/favicon\\.(?:ico|svg)$/.test(url.pathname)) {
     event.respondWith((async () => {
