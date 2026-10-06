@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { ecdictEntryToWord, wordTapBucket, wordTapEntryToWord } from './openWordSources.ts'
+import { uniqueTaggedDicts } from './dictCatalog.ts'
 
 const publicRoot = new URL('../../../public/', import.meta.url)
 const readJson = async relative => JSON.parse(await readFile(new URL(relative, publicRoot), 'utf8'))
@@ -19,6 +20,31 @@ test('nine recite lists are available without replacing the original CET-4 book'
     assert.equal(adapted.word, entries[0].word)
     assert.ok(adapted.trans.length || adapted.definition)
   }
+})
+
+test('default dictionary groups expose every book once, including recite books', async () => {
+  const catalog = await readJson('list/word.json')
+  const categories = new Map()
+
+  for (const book of catalog) {
+    const books = categories.get(book.category) || []
+    books.push(book)
+    categories.set(book.category, books)
+  }
+
+  const allBooks = []
+  for (const books of categories.values()) {
+    const tags = {}
+    for (const book of books) {
+      for (const tag of book.tags) (tags[tag] ||= []).push(book)
+    }
+    const visible = uniqueTaggedDicts(tags)
+    assert.deepEqual(visible.map(book => book.id), books.map(book => book.id))
+    allBooks.push(...visible)
+  }
+  assert.equal(allBooks.length, 10)
+  assert.equal(allBooks.filter(book => String(book.id).startsWith('recite-')).length, 9)
+  assert.ok(allBooks.some(book => book.id === 1))
 })
 
 test('WordTap dictionary buckets resolve reading words on demand', async () => {
